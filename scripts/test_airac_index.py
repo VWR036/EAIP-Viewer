@@ -117,7 +117,7 @@ class FixtureTests(unittest.TestCase):
 class RealDatasetTests(unittest.TestCase):
     def test_airports_against_xml(self):
         project = Path(__file__).resolve().parents[1]
-        source = project.parent / "Dataset"
+        source = project / "Dataset"
         result = build(source)
         raw, refs = {}, []
         def scan(node, oid, path):

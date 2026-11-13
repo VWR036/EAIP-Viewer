@@ -4,44 +4,52 @@
 
 ## 准备数据
 
-Python 3.9+，无第三方 Python 依赖。默认源为项目相邻的 `../EAIP2026-11.V1.5_Web/Data`，必须包含 `JsonPath/`、`Customers.js` 和版本目录，不能只提供版本目录里的 PDF。
+Python 3.9+，无第三方 Python 依赖。克隆仓库后，将单独获取的资料放入项目内部，无需创建目录联接。
+
+- EAIP：将原始 `EAIP2026-11.V1.5_Web/Data/` 下的全部内容放到项目的 `public/data/eaip/` 中，必须包含 `Customers.js`、`JsonPath/` 和版本目录，不能只放 PDF，也不要额外嵌套一层 `Data/`。
+- AIRAC：将完整的 `Dataset/` 放到项目根目录，包含 `checksum.xml`、`Baseline/`、`Difference/` 和 `schema/`。
+
+目录结构如下，项目文件夹叫 `EAIP-Viewer` 或 `NAIP-Viewer` 都不影响使用：
 
 ```text
-public/data/
-├── eaip/               # 指向完整 Web/Data 的目录联接，保留原始哈希文件名
-│   ├── Customers.js
-│   ├── JsonPath/
-│   └── EAIP2026-11.V1.5/
-├── index/              # npm run index 生成
-└── airac-index/        # npm run index:airac 生成
+EAIP-Viewer/
+├── package.json
+├── scripts/
+├── src/
+├── Dataset/                    # AIRAC 原始数据
+│   ├── checksum.xml
+│   ├── Baseline/
+│   ├── Difference/
+│   └── schema/
+└── public/
+    └── data/
+        ├── eaip/               # EAIP 原始 Data 目录中的内容
+        │   ├── Customers.js
+        │   ├── JsonPath/
+        │   └── EAIP2026-11.V1.5/
+        │       ├── Terminal/
+        │       ├── GeneralDoc/
+        │       └── HtmlTemplate/
+        ├── index/              # npm run index 生成
+        └── airac-index/        # npm run index:airac 生成
 ```
 
-本机已建立 `public/data/eaip` 联接。其他 Windows 环境可在项目根目录执行（目标路径改为实际位置）：
-
-```powershell
-New-Item -ItemType Junction -Path public/data/eaip -Target "C:/path/EAIP2026-11.V1.5_Web/Data"
-```
+资料包和生成索引均不入 Git，需要单独提供给使用者。只阅读 EAIP 航图时，可以不放 `Dataset`，也不用运行 `npm run index:airac`。EAIP 原始资料需要保留，预览时仍会加载其中的 PDF；AIRAC 前端读取生成的索引。
 
 ## 启动
 
-在项目根目录执行：
+放好资料后，在项目根目录执行：
 
 ```powershell
 npm install
-npm run index          # 生成 EAIP 航图和资料目录索引
-npm run index:airac    # 生成 AIRAC Dataset 索引（需要 AIRAC 数据模块时执行）
+npm run index          # 读取 public/data/eaip，生成 EAIP 索引
+npm run index:airac    # 读取 Dataset，生成 AIRAC 索引（按需执行）
 npm run dev
 ```
 
-两套索引独立生成，`npm run index` 不会生成 AIRAC 索引。首次使用、重新克隆项目或更换对应资料包后，需要运行相应的索引命令；索引已存在且资料未变时，直接运行 `npm run dev` 即可，无需每次重新生成。
+打开 http://localhost:5173/。
 
-打开 http://localhost:5173/。其他源目录可直接执行：
-
-```powershell
-python scripts/build_eaip_index.py --source "C:/path/EAIP_Web/Data"
-```
-
-`--source` 负责生成索引，`public/data/eaip` 必须指向同一数据源。更换资料期后重新生成索引并刷新页面。数据与生成索引均不入 Git。
+两套索引独立生成，`npm run index` 不会生成 AIRAC 索引。首次使用、重新克隆项目或更换对应资料包后，需要运行相应的索引命令；索引已存在且资料未变时，直接运行 `npm run dev` 即可，无需每次重新生成。更换资料期时，更新 `public/data/eaip/` 中的内容或项目内的 `Dataset/`，重新生成对应索引并刷新页面。
 
 ## 第一阶段功能与数据规则
 
@@ -55,7 +63,7 @@ python scripts/build_eaip_index.py --source "C:/path/EAIP_Web/Data"
 
 ## 部署
 
-`vite.config.js` 保持 `copyPublicDir: false`，不把原始资料复制进构建产物。静态部署需要另外提供完整 `dist/data`，包含 `index`、`eaip` 和 `airac-index`；Windows 本地部署可将 `dist/data` 联接到 `public/data`。
+`vite.config.js` 保持 `copyPublicDir: false`，不把原始资料复制进构建产物。静态部署需要另外提供完整 `dist/data`，包含 `index`、`eaip` 和 `airac-index`；可将项目的 `public/data` 整体复制到 `dist/data`。
 
 ## 验证
 
@@ -70,7 +78,7 @@ python -m unittest discover -s scripts -p "test_eaip_index.py"
 
 新增模块使用 Vue 3 + Ant Design Vue；旧模块保留原有界面。Python 3.9+，无需第三方 Python 包。
 
-在 NAIP-Viewer 目录执行：
+在项目根目录执行：
 
 ```powershell
 npm install
@@ -80,7 +88,7 @@ npm run index:airac -- --source "C:/path/to/Dataset"
 npm run dev
 ```
 
-`npm run index:airac` 调用 `scripts/build_airac_index.py`，默认读取相邻 `../Dataset`，生成 `public/data/airac-index/`。更换 Dataset 后需重新运行此命令并刷新页面；索引不入 Git，新环境需要重新生成。脚本输出由脚本所在项目定位，不依赖调用目录。
+`npm run index:airac` 调用 `scripts/build_airac_index.py`，默认读取项目内的 `Dataset/`，生成 `public/data/airac-index/`。更换 Dataset 后需重新运行此命令并刷新页面；索引不入 Git，新环境需要重新生成。脚本输出由脚本所在项目定位，不依赖调用目录。
 界面进入后展开左侧导航，选择 **AIRAC 数据**。旧 CSV 索引缺失不阻止 AIRAC。
 机场搜索支持名称、ICAO、IATA；空域和公共数据不受搜索影响。
 

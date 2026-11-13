@@ -180,7 +180,7 @@ def publish(payload, output):
 def main():
     project = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", type=Path, default=project.parent / "Dataset")
+    parser.add_argument("--source", type=Path, default=project / "Dataset")
     args = parser.parse_args()
     try:
         payload = build(args.source)

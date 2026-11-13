@@ -7,7 +7,7 @@ from urllib.parse import parse_qs, urlsplit
 
 
 BASE = Path(__file__).resolve().parents[1]
-DEFAULT_SOURCE = BASE.parent / 'EAIP2026-11.V1.5_Web' / 'Data'
+DEFAULT_SOURCE = BASE / 'public' / 'data' / 'eaip'
 
 
 def read_assignment(path, variable, unquoted_keys=False):
@@ -197,7 +197,7 @@ def build(source):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--source', type=Path, default=DEFAULT_SOURCE, help='EAIP Web/Data directory')
+    parser.add_argument('--source', type=Path, default=DEFAULT_SOURCE, help='EAIP data directory (Customers.js, JsonPath and edition directory)')
     parser.add_argument('--output', type=Path, default=BASE / 'public/data/index')
     args = parser.parse_args()
     # Validate every input before writing indexes.
