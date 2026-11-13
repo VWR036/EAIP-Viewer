@@ -201,7 +201,7 @@ function navChart(delta) {
   if (!c || !c.f) return
   store.curChart = idx
   store.viewer = {
-    url: dataURL('Terminal', store.airport.icao, c.f),
+    url: dataURL(c.f),
     title: `${store.airport.icao} ${store.airport.name} — ${c.n.trim()}${c.p ? '  ·  ' + c.p : ''}`,
   }
 }

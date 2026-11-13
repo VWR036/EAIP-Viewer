@@ -1,28 +1,21 @@
 <template>
   <div class="docs-panel">
-    <div class="list">
-      <template v-if="q">
-        <!-- 搜索：平铺全部匹配 -->
-        <div v-for="n in flat" :key="n.p" class="row"
-             :class="{ active: store.viewer?.url === docURL(n) }" @click="open(n)">
-          <VIcon name="doc" :size="13" class="ico"/>
-          <span class="name">{{ n.t }}</span>
-        </div>
-        <div class="count" v-if="!flat.length">无匹配文件</div>
-      </template>
-      <template v-else>
-        <!-- 目录树（两级） -->
-        <template v-for="n in tree" :key="n.p || n.t">
-          <div class="row" :class="{ active: store.viewer?.url === docURL(n) }" @click="open(n)">
-            <VIcon name="doc" :size="14" class="ico"/>
-            <span class="name">{{ n.t }}</span>
-          </div>
-          <div v-for="c in n.c" :key="c.p" class="row sub" @click="open(c)">
-            <VIcon name="doc" :size="13" class="ico"/>
-            <span class="name">{{ c.t }}</span>
-          </div>
-        </template>
-      </template>
+    <div class="count" v-if="error" role="alert">资料索引加载失败：{{ error }}</div>
+    <div class="count" v-else-if="loading">加载中…</div>
+    <div class="list" v-else>
+      <div v-for="{ node, depth } in visible" :key="node.id" class="row"
+           :class="{ active: selected === node.id && store.viewer?.url === dataURL(node.p) }"
+           :style="{ paddingLeft: 14 + depth * 16 + 'px' }" :title="node.en"
+           @click="open(node)">
+        <button v-if="node.c.length" class="tb icon" :aria-label="expanded.has(node.id) ? '收起 ' + node.t : '展开 ' + node.t"
+                :aria-expanded="expanded.has(node.id)" @click.stop="toggle(node)">
+          <VIcon :name="expanded.has(node.id) ? 'left' : 'right'" :size="12"/>
+        </button>
+        <VIcon v-else name="doc" :size="13" class="ico"/>
+        <span class="name">{{ node.t }}</span>
+        <span v-if="node.m" class="tag mod">修订</span>
+      </div>
+      <div class="count" v-if="!visible.length">无匹配文件</div>
     </div>
   </div>
 </template>
@@ -33,28 +26,43 @@ import VIcon from './VIcon.vue'
 import { store, loadJSON, dataURL } from '../store.js'
 
 const tree = ref([])
-const q = ref('')
-onMounted(async () => { tree.value = await loadJSON('/data/index/docs.json') })
+const expanded = ref(new Set())
+const selected = ref('')
+const loading = ref(true)
+const error = ref('')
+onMounted(async () => {
+  try {
+    tree.value = await loadJSON('/data/index/docs.json')
+    expanded.value = new Set(tree.value.map(n => n.id))
+  } catch (e) { error.value = e.message }
+  finally { loading.value = false }
+})
 
-const flat = computed(() => {
-  const s = q.value.trim().toLowerCase()
+const visible = computed(() => {
+  const q = store.search.trim().toLowerCase()
   const out = []
-  const walk = (nodes) => {
-    for (const n of nodes) {
-      if (n.p && n.t.toLowerCase().includes(s)) out.push(n)
-      if (n.c?.length) walk(n.c)
+  function walk(nodes, depth) {
+    for (const node of nodes) {
+      if (q) {
+        if (node.p && (node.t + ' ' + node.en).toLowerCase().includes(q)) out.push({ node, depth: 0 })
+        walk(node.c, depth + 1)
+      } else {
+        out.push({ node, depth })
+        if (expanded.value.has(node.id)) walk(node.c, depth + 1)
+      }
     }
   }
-  walk(tree.value)
+  walk(tree.value, 0)
   return out
 })
 
-const docURL = (n) => dataURL('GeneralDoc', n.p)
-
-function open(n) {
-  store.viewer = { url: docURL(n), title: 'NAIP 总资料 — ' + n.t }
+function toggle(node) {
+  expanded.value.has(node.id) ? expanded.value.delete(node.id) : expanded.value.add(node.id)
 }
-
-function setSearch(v) { q.value = v }
-defineExpose({ setSearch })
+function open(node) {
+  if (!node.p) { toggle(node); return }
+  selected.value = node.id
+  store.curChart = -1
+  store.viewer = { url: dataURL(node.p), title: 'EAIP 资料 — ' + node.t }
+}
 </script>

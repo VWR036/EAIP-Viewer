@@ -15,7 +15,7 @@ export const store = reactive({
 })
 
 export const dataURL = (...parts) =>
-  '/data/NAIP2610/' + parts.map(encodeURIComponent).join('/')
+  '/data/eaip/' + parts.flatMap(p => p.split('/')).map(encodeURIComponent).join('/')
 
 export async function loadJSON(url) {
   const r = await fetch(url)
@@ -38,11 +38,14 @@ export const CHART_GROUPS = [
   ['离场图 (SID)', ['标准仪表离场图']],
   ['进场图 (STAR)', ['标准仪表进场图']],
   ['进近图 (ILS)', ['仪表进近图_ILS']],
+  ['进近图 (LOC)', ['仪表进近图_LOC']],
   ['进近图 (VOR)', ['仪表进近图_VOR']],
   ['进近图 (NDB)', ['仪表进近图_NDB']],
   ['进近图 (RNP/RNAV)', ['进近图_RNAV_RNP_RADAR_GPS_GNSS']],
   ['目视进近图', ['目视进近图']],
   ['障碍物 / 地形图', ['机场障碍物图_精密进近地形图']],
   ['放油区 / 最低监视引导高度图', ['最低监视引导高度图_放油区图']],
+  ['航路点表', ['航路点表']],
+  ['数据库编码表', ['数据库编码表']],
   ['其他', ['其他']],
 ]

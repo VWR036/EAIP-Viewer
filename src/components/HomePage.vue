@@ -6,11 +6,11 @@
     </button>
 
     <main class="home-center">
-      <h1>NAIP<span>-Viewer</span></h1>
-      <p class="sub">中国民航国内航空资料汇编</p>
+      <h1>EAIP<span>-Viewer</span></h1>
+      <p class="sub">中国航空资料汇编</p>
 
       <div class="meta">
-        <span>{{ store.meta.DataVersion }}</span>
+        <span :title="`资料声明版本：${store.meta.DeclaredVersion || ''}`">{{ store.meta.DataVersion }}</span>
         <i/>
         <span>生效日期 {{ store.meta.EffectiveDate }}</span>
         <i/>

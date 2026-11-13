@@ -7,11 +7,13 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "index": "python scripts/build_index.py"
+    "index": "python scripts/build_eaip_index.py",
+    "index:airac": "python scripts/build_airac_index.py"
   },
   "dependencies": {
     "pdfjs-dist": "^4.6.82",
-    "vue": "^3.5.13"
+    "vue": "^3.5.13",
+    "ant-design-vue": "^4.2.6"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.2.1",

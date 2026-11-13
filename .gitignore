@@ -12,3 +12,10 @@ public/data/index/
 .DS_Store
 Thumbs.db
 *.log
+
+# Generated AIRAC snapshots
+public/data/airac-index/
+__pycache__/
+
+# EAIP original Web/Data directory (local junction)
+public/data/eaip/

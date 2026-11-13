@@ -6,9 +6,10 @@
         <div v-for="a in filtered" :key="a.icao" class="row" @click="select(a)">
           <span class="code">{{ a.icao }}</span>
           <span class="name">{{ a.name }}</span>
-          <span class="meta">{{ a.bureau }}</span>
+          <span class="meta">{{ a.iata }}</span>
         </div>
         <div class="count" v-if="filtered.length">{{ filtered.length }} 个机场</div>
+        <div class="count" v-else>无匹配机场</div>
       </div>
     </template>
 
@@ -20,17 +21,16 @@
         <span class="name">{{ store.airport.name }}</span>
       </div>
       <div class="detail" v-if="detail">
-        <span>标高 {{ detail.elev }}{{ detail.uom }}</span>
-        <span v-if="detail.magvar">磁差 {{ detail.magvar }}°</span>
-        <span v-if="detail.transAlt">过渡高度 {{ detail.transAlt }}{{ detail.uom }}</span>
-        <span v-if="detail.transLvl">过渡高度层 {{ detail.transLvl }}</span>
-        <span v-if="detail.intl === 'Y'" class="intl">国际</span>
+        <span v-if="detail.elev">标高 {{ detail.elev }}</span>
+        <span v-if="detail.magvar">磁差 {{ detail.magvar }}</span>
         <div class="rwys" v-if="detail.rwys?.length">
           <span v-for="r in detail.rwys" :key="r.desig">
-            {{ r.desig.trim() }} · {{ r.len }}m{{ r.comp ? ' ' + r.comp : '' }}
+            {{ r.desig }} · {{ r.dimensions }}m
           </span>
         </div>
       </div>
+      <div class="count" v-if="chartError" role="alert">航图索引加载失败：{{ chartError }}</div>
+      <div class="count" v-else-if="loading">加载中…</div>
       <div class="list">
         <div v-for="(g, gi) in groups" :key="g.label" class="group">
           <div class="group-h" @click="toggle(gi)">
@@ -38,7 +38,7 @@
             <span class="n">{{ g.items.length }}</span>
           </div>
           <div class="group-b" v-show="!closedSet.has(gi)">
-            <div v-for="(c, ci) in g.items" :key="ci"
+            <div v-for="c in g.items" :key="c.id"
                  class="chart" :class="{ active: isActive(g, c) }"
                  @click="openChart(c, g)">
               <span class="pg">{{ c.p || '—' }}</span>
@@ -55,16 +55,20 @@
 </template>
 
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, ref, watch, onBeforeUnmount } from 'vue'
 import VIcon from './VIcon.vue'
 import { store, loadJSON, dataURL, CHART_GROUPS } from '../store.js'
 
 const closedSet = ref(null)
+const loading = ref(false)
+const chartError = ref('')
+let selectSeq = 0
+onBeforeUnmount(() => { selectSeq++ })
 
 const filtered = computed(() => {
   const q = store.search.trim().toUpperCase()
   if (!q) return store.airports
-  return store.airports.filter(a => a.icao.includes(q) || a.name.toUpperCase().includes(q))
+  return store.airports.filter(a => [a.icao, a.iata, a.name, a.nameEn].some(v => v.toUpperCase().includes(q)))
 })
 
 const detail = computed(() => store.details[store.airport?.icao])
@@ -90,13 +94,28 @@ watch([() => store.airport, groups], () => {
 }, { immediate: true, deep: false })
 
 async function select(a) {
+  const seq = ++selectSeq
   store.airport = a
-  store.charts = await loadJSON(`/data/index/charts/${encodeURIComponent(a.icao)}.json`)
+  store.charts = []
+  store.flatCharts = []
   store.curChart = -1
   store.viewer = null
+  chartError.value = ''
+  loading.value = true
+  try {
+    const charts = await loadJSON(`/data/index/charts/${encodeURIComponent(a.icao)}.json`)
+    if (seq === selectSeq) store.charts = charts
+  } catch (error) {
+    if (seq === selectSeq) chartError.value = error.message
+  } finally {
+    if (seq === selectSeq) loading.value = false
+  }
 }
 
 function back() {
+  selectSeq++
+  loading.value = false
+  chartError.value = ''
   store.airport = null
   store.viewer = null
   store.curChart = -1
@@ -122,7 +141,7 @@ function openChart(c, g) {
   store.flatCharts = groups.value.flatMap(gg => gg.items)
   store.curChart = flatIndex(groups.value, g, c)
   store.viewer = {
-    url: dataURL('Terminal', store.airport.icao, c.f),
+    url: dataURL(c.f),
     title: `${store.airport.icao} ${store.airport.name} — ${c.n.trim()}${c.p ? '  ·  ' + c.p : ''}`,
   }
 }
