@@ -143,7 +143,7 @@ body {
 .group-h:hover { color: var(--text); }
 .group-h .n { font-weight: 400; letter-spacing: 0; }
 .chart {
-  display: flex; align-items: center; gap: 9px; padding: 5.5px 14px 5.5px 22px;
+  display: flex; align-items: baseline; gap: 9px; padding: 5.5px 14px 5.5px 22px;
   cursor: pointer; border-left: 2px solid transparent; font-size: 13px;
 }
 .chart:hover { background: var(--panel2); }
@@ -153,13 +153,15 @@ body {
   min-width: 46px; text-align: center; flex: none;
 }
 .chart.active .pg { color: var(--accent); }
-.chart .cn { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chart-content { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 9px; }
+.chart .cn { min-width: 0; overflow-wrap: anywhere; }
+.chart .tag { white-space: nowrap; }
 .tag {
   font-size: 10px; padding: 1px 5px; border-radius: 3px; flex: none; font-weight: 600;
 }
 .tag.sup { color: var(--tag-sup); background: var(--tag-sup-bg); }
 .tag.mod { color: var(--tag-mod); background: var(--tag-mod-bg); }
-.tag.nopdf { color: var(--dim); background: var(--panel2); }
+.tag.nopdf, .tag.note { color: var(--dim); background: var(--panel2); }
 
 /* ---------- PDF 视图 ---------- */
 .viewer { flex: 1; display: flex; flex-direction: column; min-height: 0; }

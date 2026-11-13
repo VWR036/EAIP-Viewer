@@ -17,5 +17,6 @@ Thumbs.db
 public/data/airac-index/
 __pycache__/
 
-# EAIP original Web/Data directory (local junction)
+# Original EAIP and AIRAC data
 public/data/eaip/
+Dataset/

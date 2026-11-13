@@ -42,10 +42,13 @@
                  class="chart" :class="{ active: isActive(g, c) }"
                  @click="openChart(c, g)">
               <span class="pg">{{ c.p || '—' }}</span>
-              <span class="cn">{{ c.n.trim() }}</span>
-              <span v-if="c.s" class="tag sup">SUP</span>
-              <span v-if="c.m" class="tag mod">修订</span>
-              <span v-if="!c.f" class="tag nopdf">无文件</span>
+              <div class="chart-content">
+                <span class="cn" :title="c.n.trim()">{{ c.n.trim() }}</span>
+                <span v-for="tag in c.tags" :key="tag" class="tag note">{{ tag }}</span>
+                <span v-if="c.s" class="tag sup">SUP</span>
+                <span v-if="c.m" class="tag mod">修订</span>
+                <span v-if="!c.f" class="tag nopdf">无文件</span>
+              </div>
             </div>
           </div>
         </div>

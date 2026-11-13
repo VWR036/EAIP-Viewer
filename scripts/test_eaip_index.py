@@ -42,18 +42,24 @@ class EaipIndexTests(unittest.TestCase):
     @unittest.skipUnless(DEFAULT_SOURCE.is_dir(), 'Local EAIP edition is required')
     def test_published_edition_coverage(self):
         airports, charts, details, docs, meta = build(DEFAULT_SOURCE)
+        source_rows = read_assignment(DEFAULT_SOURCE / 'JsonPath/AD.js', 'adTreeData')
+        source_tags = {r['id']: [tag for tag in (r['Node'] or []) if tag] for r in source_rows}
         self.assertEqual({a['icao'] for a in airports}, set(charts))
         referenced = set()
         for icao, entries in charts.items():
             paths = [c['f'] for c in entries]
             self.assertEqual(len(paths), len(set(paths)), icao)
             self.assertTrue(all('/Terminal/' + icao + '/' in p for p in paths))
+            for chart in entries:
+                self.assertEqual(chart['tags'], source_tags[chart['id']], chart['id'])
             referenced.update(paths)
         identities = set()
         def walk(nodes):
             for n in nodes:
                 self.assertNotIn(n['id'], identities)
                 identities.add(n['id'])
+                if n['id'].startswith('AD/'):
+                    self.assertEqual(n['tags'], source_tags[n['id'].split('/', 1)[1]])
                 if n['p']:
                     referenced.add(n['p'])
                 walk(n['c'])

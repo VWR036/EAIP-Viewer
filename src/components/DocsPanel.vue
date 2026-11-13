@@ -13,6 +13,7 @@
         </button>
         <VIcon v-else name="doc" :size="13" class="ico"/>
         <span class="name">{{ node.t }}</span>
+        <span v-for="tag in node.tags" :key="tag" class="tag note">{{ tag }}</span>
         <span v-if="node.m" class="tag mod">修订</span>
       </div>
       <div class="count" v-if="!visible.length">无匹配文件</div>

@@ -62,6 +62,10 @@ def title(row):
     return row['name_cn'] or row['name']
 
 
+def tags(row):
+    return [tag for tag in (row['Node'] or []) if tag]
+
+
 def chart_type(name):
     text = name.upper()
     if re.search(r'\bSID\b', text):
@@ -133,7 +137,7 @@ def build(source):
         if airport['pdfPath']:
             charts.append({'id': airport['id'], 'n': '机场细则' if detail else '机场资料（整份 PDF）',
                            'p': '', 't': '机场细则', 's': False,
-                           'm': airport['Is_Modified'] == 'Y', 'f': airport['pdfPath']})
+                           'm': airport['Is_Modified'] == 'Y', 'f': airport['pdfPath'], 'tags': tags(airport)})
             seen.add(airport['pdfPath'])
         for row in descendants(airport, children):
             path = row['pdfPath']
@@ -144,12 +148,12 @@ def build(source):
             name = match[2].strip() if match else title(row)
             charts.append({'id': row['id'], 'n': name, 'p': match[1] if match else '',
                            't': chart_type(name), 's': False,
-                           'm': row['Is_Modified'] == 'Y', 'f': path})
+                           'm': row['Is_Modified'] == 'Y', 'f': path, 'tags': tags(row)})
         charts_by_airport[icao] = charts
 
     def node(row, child_map, prefix):
         return {'id': prefix + '/' + row['id'], 't': title(row), 'en': row['name'],
-                'p': row['pdfPath'], 'm': row['Is_Modified'] == 'Y',
+                'p': row['pdfPath'], 'm': row['Is_Modified'] == 'Y', 'tags': tags(row),
                 'c': [node(c, child_map, prefix) for c in child_map.get(row['id'], [])]}
 
     docs = []
