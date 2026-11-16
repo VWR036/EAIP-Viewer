@@ -2,28 +2,19 @@
   <HomePage v-if="atHome" :theme="theme" @enter="enterApp" @toggleTheme="toggleTheme"/>
 
   <ConfigProvider v-else :theme="antConfig"><div class="shell" :class="{ 'airac-shell': store.tab === 'airac' }">
-    <nav class="rail" :class="{ open: navOpen }">
-      <button @click="navOpen = !navOpen">
-        <VIcon name="panel" :size="17"/>
-        <span class="lbl">导航</span>
-      </button>
-      <span class="rail-line"/>
+    <nav class="rail">
       <button :class="{ on: store.tab === 'charts' }" @click="store.tab = 'charts'">
-        <VIcon name="chart" :size="18"/>
         <span class="lbl">机场航图</span>
       </button>
       <button :class="{ on: store.tab === 'docs' }" @click="store.tab = 'docs'">
-        <VIcon name="book" :size="18"/>
         <span class="lbl">EAIP 资料</span>
       </button>
-      <button :class="{ on: store.tab === 'airac' }" @click="store.tab = 'airac'" title="AIRAC 数据"><VIcon name="table" :size="18"/><span class="lbl">AIRAC 数据</span></button>
+      <button :class="{ on: store.tab === 'airac' }" @click="store.tab = 'airac'" title="AIRAC 数据"><span class="lbl">AIRAC 数据</span></button>
       <div class="spring"/>
       <button @click="goHome">
-        <VIcon name="home" :size="17"/>
         <span class="lbl">回到主页</span>
       </button>
       <button @click="toggleTheme">
-        <VIcon :name="theme === 'dark' ? 'sun' : 'moon'" :size="17"/>
         <span class="lbl">{{ theme === 'dark' ? '浅色模式' : '深色模式' }}</span>
       </button>
     </nav>
@@ -54,7 +45,6 @@
 
 <script setup>
 import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
-import VIcon from './components/VIcon.vue'
 import HomePage from './components/HomePage.vue'
 import AirportPanel from './components/AirportPanel.vue'
 import DocsPanel from './components/DocsPanel.vue'
@@ -85,7 +75,6 @@ function goHome() {
 }
 
 const sidebarOpen = ref(true)
-const navOpen = ref(false)
 
 watch(() => store.tab, () => {
   store.search = ''

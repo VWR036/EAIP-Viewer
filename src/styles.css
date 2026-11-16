@@ -55,10 +55,10 @@ body {
 .shell { height: 100%; display: flex; }
 
 .rail {
-  width: 52px; flex: none; display: flex; flex-direction: column; align-items: stretch;
+  width: 150px; flex: none; display: flex; flex-direction: column; align-items: stretch;
   padding: 10px 0; gap: 4px;
   background: var(--panel); border-right: 1px solid var(--line);
-  transition: width 0.18s ease; overflow: hidden;
+  overflow: hidden;
 }
 .rail button {
   height: 38px; border: none; background: none;
@@ -69,17 +69,11 @@ body {
 }
 .rail button:hover { color: var(--text); background: var(--panel2); }
 .rail button.on { color: var(--accent); background: var(--accent-soft); }
-.rail button svg { flex: none; }
 .rail .spring { flex: 1; }
-.rail-line { width: 24px; height: 1px; background: var(--line); margin: 4px 14px; flex: none; }
 .rail .lbl {
   font-size: 13px; letter-spacing: 0.02em;
-  opacity: 0; transition: opacity 0.15s ease 0.04s;
   min-width: 0; flex: none;
 }
-.rail.open { width: 150px; }
-.rail.open .lbl { opacity: 1; }
-.rail.open .rail-line { width: auto; }
 
 .sidebar {
   width: 300px; flex: none; display: flex; flex-direction: column;
