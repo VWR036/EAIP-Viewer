@@ -9,7 +9,7 @@ Python 3.9+，无第三方 Python 依赖。克隆仓库后，将单独获取的�
 - EAIP：将原始 `EAIP2026-11.V1.5_Web/Data/` 下的全部内容放到项目的 `public/data/eaip/` 中，必须包含 `Customers.js`、`JsonPath/` 和版本目录，不能只放 PDF，也不要额外嵌套一层 `Data/`。
 - AIRAC：将完整的 `Dataset/` 放到项目根目录，包含 `checksum.xml`、`Baseline/`、`Difference/` 和 `schema/`。
 
-目录结构如下，项目文件夹叫 `EAIP-Viewer` 或 `NAIP-Viewer` 都不影响使用：
+目录结构如下：
 
 ```text
 EAIP-Viewer/
@@ -99,20 +99,15 @@ npm run dev
 
 索引位于 `public/data/airac-index/`，不入 Git。不可变快照子目录包含 objects.json 和 relations.json，manifest.json 原子切换快照入口；失败不更新旧索引。快照目录名由内容哈希产生，相同输入可复现。
 现有 `vite.config.js` 的 `copyPublicDir: false` 保持不变；部署时需另行提供整个 `public/data` 目录（包含 AIRAC 快照），否则索引请求失败。
-本阶段不提供地图、编辑、差异合并、全对象搜索或后端。
+AIRAC 顶栏可切换 **数据浏览 / 地图**。地图使用 Leaflet 原生 Canvas 绘制机场 ARP、指定点、Navaid 整体及航段，四层默认开启。地图搜索独立于机场树，支持机场 ICAO/IATA/名称、指定点和导航设施代码/名称、航路编号；结果保留 ID，同名对象可分别选择，最多显示 50 项并提示剩余数量。
+点击点或航段可查看关键属性及详情，点击航段所属航路可高亮其全部可绘制航段；重叠位置可在候选列表访问其他航段及航路。无位置对象仍可搜索和查看详情，地图诊断区分合法缺失、无效几何及不可绘制航段。内部切换数据详情和地图保留视野及图层选择。直线仅表达端点关系，不表示实际飞行轨迹或可飞方向。
+
+地图复用已加载的索引，不额外读取 Dataset；坐标只支持已确认的 EPSG:4326（原始纬度、经度），位置缺失不补点。新增依赖仅 `leaflet`，其 CSS 随应用加载。首版深浅主题作用于控件及覆盖层，底图保持同一 OSM 样式。
+底图通过网络加载 `https://tile.openstreetmap.org/{z}/{x}/{y}.png`，保留可见的 [© OpenStreetMap contributors](https://www.openstreetmap.org/copyright) 署名；瓦片失败会提示并允许重试，已加载的覆盖层仍可交互。OSM 公共瓦片仅适合开发和轻量访问，上线前核对 [瓦片使用政策](https://operations.osmfoundation.org/policies/tiles/)，高流量部署需另选供应商或自托管；不批量预取、不提供离线下载。
+
+若当前网络无法访问 OSM，可在项目根目录 `.env.local` 中同时设置 `VITE_AIRAC_TILE_URL`（服务商提供的 `{z}/{x}/{y}` 瓦片 URL 模板）和 `VITE_AIRAC_TILE_ATTRIBUTION`（该服务要求的署名，可包含链接），然后重启开发服务器。部署时需在编译环境中设置这两个变量。仅支持适用于 Leaflet 默认 EPSG:3857、与 WGS84 数据对齐的标准 XYZ 栅格服务，不使用有 GCJ-02/BD-09 偏移的底图。未配置时使用 OSM；请求失败不会自动切换服务。不要在前端变量中放置私密凭据。警告显示失败服务域名，失败瓦片成功加载或移出加载范围后会清除对应状态。
+本阶段不提供编辑、差异合并、空域/跑道几何、三维、实时航迹、全对象搜索或后端。
 
 数据与异常测试：`python -m unittest discover -s scripts -p "test_airac_index.py"`。
+地图转换测试：`node --test scripts/test_airac_map.mjs`（Node 内置测试，无新增测试框架；本地索引存在时同时验证真实快照）。
 开发验证禁止运行生产构建；可使用 Vite 开发预览及 Vue SFC 编译检查。
-
-### 本地验证记录（2026-11-13）
-
-- 30 个清单文件 SHA-256 通过，Baseline 18 类共 10,242 个对象、13,080 条引用全部可解析。全部对象在目标生效时刻有效，均为单时间片；空域八类计数与实施文档一致。
-- 独立从 XML 核对 ZBAA：3 跑道、19 导航设施、0 指定点、7 关联航段、5 关联航路；ZSPD：4、13、24、72、28。方向、中线点、设备和去重关系均已逐项核对。85 个指定点机场引用全部检查通过。
-- 11 项 Python 测试通过，异常测试确认失败不会替换已有 manifest。相同输入生成相同快照。
-- Vue SFC 编译检查通过；Vite 开发浏览验证了缺旧 CSV 索引仍可进入 AIRAC、IATA/ICAO 不区分大小写搜索、无匹配状态、空分类、面包屑、关联列表及跳转、来源 XML、深浅色主题。
-- 原 NAIP 原始数据和 CSV 索引缺失，旧模块的完整 PDF/表格内容无法核验。未运行生产构建、未提交或发布。
-- 当前对象 JSON 约 79 MB，首次进入需加载完整索引，后续复用内存；尚未做分片加载。重叠时间片和 delta 状态重建明确不支持。
-
-实际数据与实施文档差异：`onRunway` 的目标是 RunwayDirection，不是 Runway；本地 `schema/aixm511/xsd/AIXM_Features.xsd` 的 RunwayCentrelinePoint 定义也声明为 RunwayDirectionPropertyType。因此中线点按 `onRunway → RunwayDirection → usedRunway → Runway` 聚合；487 条原始引用路径全部保留，未猜测或改写原数据。
-
-修正后再次验证通过：ZBAA 为 6 个跑道方向、16 个中线点；ZSPD 为 8 个跑道方向、22 个中线点。前端加载逻辑另以隔离 fetch 验证 404、无效 JSON、非法索引路径、真实快照结构和已加载索引复用，均通过。

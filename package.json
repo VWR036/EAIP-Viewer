@@ -11,9 +11,10 @@
     "index:airac": "python scripts/build_airac_index.py"
   },
   "dependencies": {
+    "ant-design-vue": "^4.2.6",
+    "leaflet": "^1.9.4",
     "pdfjs-dist": "^4.6.82",
-    "vue": "^3.5.13",
-    "ant-design-vue": "^4.2.6"
+    "vue": "^3.5.13"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.2.1",

@@ -1,0 +1,274 @@
+<template>
+  <section class="airac-map">
+    <Spin v-if="airac.status === 'loading'" class="airac-map-state" tip="正在读取并校验 AIRAC 索引…" />
+    <Result v-else-if="airac.status === 'error'" status="error" title="AIRAC 索引加载失败" :sub-title="airac.error">
+      <template #extra><Button @click="loadAirac">重试加载</Button></template>
+    </Result>
+    <Empty v-else-if="airac.status === 'idle'" description="尚未加载 AIRAC 数据" />
+    <template v-else>
+      <div class="airac-map-tools">
+        <Input v-model:value="query" allow-clear placeholder="地图搜索 — 机场 / 指定点 / 导航设施 / 航路" aria-label="地图搜索" />
+        <Checkbox v-for="type in mapTypes" :key="type" v-model:checked="enabled[type]">
+          <span class="airac-map-key" :style="{ background: colors[type] }" />{{ typeNames[type] }}
+        </Checkbox>
+        <Button @click="showDiagnostics = !showDiagnostics">地图诊断</Button>
+      </div>
+      <Alert v-if="tileError" type="warning" show-icon message="底图瓦片加载失败；AIRAC 覆盖层仍可使用。" :description="`无法加载 ${tileHost} 的部分瓦片，请检查网络或配置可访问的底图服务。`">
+        <template #action><Button size="small" @click="retryTiles">重试底图</Button></template>
+      </Alert>
+      <Alert v-if="mapError" type="error" show-icon :message="mapError" />
+      <div class="airac-map-content">
+        <div ref="container" class="airac-map-canvas" aria-label="AIRAC 地图" />
+        <aside v-if="query.trim() || selected || showDiagnostics || !hasFeatures" class="airac-map-inspector">
+          <template v-if="query.trim()">
+            <h2>搜索结果（{{ matches.total }}）</h2>
+            <Empty v-if="!matches.total" description="无匹配地图对象" />
+            <Button v-for="entry in matches.results" :key="entry.id" class="airac-map-result" @click="locate(entry.id)">
+              <strong>{{ typeNames[entry.type] }} · {{ entry.code || '无代码' }} · {{ entry.name || '无名称' }}</strong>
+              <small>{{ entry.id }}</small><small v-if="entry.reason">不可定位：{{ entry.reason }}</small>
+            </Button>
+            <p v-if="matches.total > matches.results.length" class="airac-hint">仅显示前 {{ matches.results.length }} 项，另有 {{ matches.total - matches.results.length }} 项；请缩小搜索范围。</p>
+          </template>
+          <Empty v-if="!hasFeatures" description="没有可绘制的有效要素，请查看地图诊断" />
+          <template v-if="selected">
+            <h2>{{ label(selected) }}</h2>
+            <p class="airac-hint">{{ typeNames[selected.type] }} · {{ selected.id }}</p>
+            <Alert v-if="selectionReason" type="warning" :message="`不可定位：${selectionReason}`" />
+            <p v-for="key in summaryKeys" :key="key">{{ fieldNames[key] || key }}：{{ propertyText(selected, key) }}</p>
+            <template v-if="selected.type === 'RouteSegment' && selectedFeature">
+              <p>所属航路：<Button type="link" @click="locate(selectedFeature.properties.routeId)">{{ label(airac.objects[selectedFeature.properties.routeId]) }}</Button></p>
+              <p class="airac-hint">已高亮所属航路的全部 {{ data.routes.get(selectedFeature.properties.routeId).length }} 个可绘制航段。</p>
+              <p v-for="key in ['startId','endId']" :key="key">{{ key === 'startId' ? '起点' : '终点' }}：
+                <Button type="link" @click="locate(selectedFeature.properties[key])">{{ label(airac.objects[selectedFeature.properties[key]]) }}</Button>
+              </p>
+            </template>
+            <p v-if="selected.type === 'Route'">可绘制航段：{{ data.routes.get(selected.id).length }}（高亮实际航段集合）</p>
+            <template v-if="selected.type === 'Navaid'">
+              <p class="airac-hint">位置代表 Navaid 整体；设备参数和独立位置以设备原始数据为准。</p>
+              <h3>关联设备（{{ data.equipment.get(selected.id).length }}）</h3>
+              <Button v-for="id in data.equipment.get(selected.id)" :key="id" type="link" @click="detail(id)">{{ typeNames[airac.objects[id].type] }} · {{ label(airac.objects[id]) }} · 查看设备详情</Button>
+            </template>
+            <Button type="primary" @click="detail(selected.id)">查看数据详情</Button>
+          </template>
+          <template v-if="candidates.length > 1">
+            <h3>点击位置的其他对象（{{ candidates.length }}）</h3>
+            <Button v-for="id in candidates" :key="id" class="airac-map-result" @click="choose(id, clickLocation)">
+              {{ typeNames[airac.objects[id].type] }} · {{ data.features.get(id).properties.label }}<small>{{ id }}</small>
+            </Button>
+          </template>
+          <template v-if="showDiagnostics">
+            <h2>地图诊断</h2>
+            <p v-for="(count,type) in data.diagnostics.counts" :key="type">{{ typeNames[type] }}：绘制 {{ count.drawn }} · 缺失 {{ count.missing }} · 无效 {{ count.invalid }}<template v-if="type === 'RouteSegment'"> · 不可绘制 {{ count.excluded }}</template></p>
+            <details v-for="[title,entries] in diagnosticGroups" :key="title">
+              <summary>{{ title }}（{{ entries.length }}）</summary>
+              <p v-for="(entry,i) in entries" :key="i"><Button type="link" @click="detail(entry.id)">{{ typeNames[entry.type] }} · {{ entry.id }}</Button><br>{{ entry.reason }}</p>
+            </details>
+          </template>
+        </aside>
+      </div>
+      <p class="airac-map-note">航路线仅表示端点关系，不代表实际飞行轨迹或可飞方向。点名随放大显示；视野内最多显示 80 个标签。</p>
+    </template>
+  </section>
+</template>
+
+<script setup>
+import { computed, ref, shallowRef, reactive, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { Alert, Button, Checkbox, Empty, Input, Result, Spin } from 'ant-design-vue'
+import L from 'leaflet'
+import 'leaflet/dist/leaflet.css'
+import { airac, label, typeNames, fieldNames, openObject, loadAirac } from '../airac.js'
+import { buildMapData, searchMap, mapTypes, propertyText } from '../airac-map.js'
+
+const props = defineProps({ visible: Boolean, theme: String })
+const emit = defineEmits(['detail'])
+const container = ref(null), data = shallowRef(null)
+const query = ref(''), selectedId = ref(''), candidates = ref([]), showDiagnostics = ref(false)
+const enabled = reactive(Object.fromEntries(mapTypes.map(type => [type, true])))
+const tileError = ref(false), mapError = ref('')
+const tileUrl = import.meta.env.VITE_AIRAC_TILE_URL
+const tileAttribution = import.meta.env.VITE_AIRAC_TILE_ATTRIBUTION
+const tileHost = ref('tile.openstreetmap.org')
+const failedTiles = new Set()
+const colors = computed(() => props.theme === 'dark'
+  ? { AirportHeliport: '#d89139', DesignatedPoint: '#4a96c9', Navaid: '#279f86', Route: '#596ca4' }
+  : { AirportHeliport: '#986014', DesignatedPoint: '#166598', Navaid: '#087962', Route: '#526797' })
+const matches = computed(() => data.value ? searchMap(data.value, query.value) : { results: [], total: 0 })
+const selected = computed(() => airac.objects[selectedId.value])
+const selectedFeature = computed(() => data.value?.features.get(selectedId.value))
+const selectionReason = computed(() => data.value?.search.find(entry => entry.id === selectedId.value)?.reason || '')
+const hasFeatures = computed(() => data.value?.features.size > 0)
+const summaryKeys = computed(() => ({
+  AirportHeliport: ['locationIndicatorICAO', 'designatorIATA', 'name', 'fieldElevation'],
+  DesignatedPoint: ['designator', 'name', 'type'],
+  Navaid: ['designator', 'name', 'type'],
+  Route: ['designatorPrefix', 'designatorSecondLetter', 'designatorNumber', 'name'],
+  RouteSegment: ['length', 'magneticTrack', 'reverseMagneticTrack'],
+}[selected.value?.type] || []))
+const diagnosticGroups = computed(() => [
+  ['合法缺失位置', data.value.diagnostics.missing],
+  ['无效位置 / 关系错误', data.value.diagnostics.invalid],
+  ['不可绘制航段', data.value.diagnostics.segments],
+])
+let map, tiles, renderer, highlight, observer, mounted = false, clickLocation
+const groups = new Map(), pointLayers = new Map()
+const layerType = type => type === 'RouteSegment' ? 'Route' : type
+const latlng = coordinates => L.latLng(coordinates[1], coordinates[0])
+const textNode = text => { const node = document.createElement('span'); node.textContent = text; return node }
+
+function detail(id) { openObject(id); emit('detail') }
+function featureSet(id) {
+  return airac.objects[id].type === 'Route' ? data.value.routes.get(id) : [data.value.features.get(id)].filter(Boolean)
+}
+function highlightSelection() {
+  if (!map) return
+  highlight.clearLayers()
+  if (!selected.value) return
+  const features = selected.value.type === 'RouteSegment'
+    ? data.value.routes.get(data.value.features.get(selectedId.value)?.properties.routeId) || []
+    : featureSet(selectedId.value)
+  L.geoJSON(features, {
+    renderer, interactive: false,
+    style: { color: props.theme === 'dark' ? '#c43b16' : '#ad2809', weight: 5, opacity: 1 },
+    pointToLayer: (feature, location) => L.circleMarker(location, { renderer, interactive: false, radius: 10, color: '#c43b16', weight: 3, fillOpacity: 0.25 }),
+  }).addTo(highlight)
+}
+function choose(id, location) {
+  selectedId.value = id
+  highlightSelection()
+  const object = airac.objects[id]
+  const features = featureSet(id)
+  if (!features.length) { map?.closePopup(); return }
+  const content = document.createElement('div')
+  const title = document.createElement('strong')
+  title.textContent = label(object)
+  content.append(title)
+  const addLine = text => { const p = document.createElement('p'); p.textContent = text; content.append(p) }
+  addLine(`${typeNames[object.type]} · ${id}`)
+  const keys = { AirportHeliport: ['locationIndicatorICAO', 'designatorIATA', 'fieldElevation'], DesignatedPoint: ['designator', 'type'], Navaid: ['designator', 'type'], RouteSegment: ['length', 'magneticTrack', 'reverseMagneticTrack'] }[object.type] || []
+  for (const key of keys) addLine(`${fieldNames[key] || key}：${propertyText(object, key)}`)
+  if (object.type === 'RouteSegment') {
+    const p = features[0].properties
+    addLine(`航路：${label(airac.objects[p.routeId])}`)
+    addLine(`起点：${label(airac.objects[p.startId])}；终点：${label(airac.objects[p.endId])}`)
+    addLine(`已高亮所属航路的 ${data.value.routes.get(p.routeId).length} 个可绘制航段。`)
+  }
+  if (object.type === 'Route') addLine(`高亮 ${features.length} 个实际航段`)
+  if (candidates.value.length > 1) addLine(`此位置命中 ${candidates.value.length} 个对象，可在右侧选择其他航段 / 航路。`)
+  const button = document.createElement('button')
+  button.className = 'tb'; button.textContent = '查看数据详情'
+  button.addEventListener('click', () => detail(id))
+  content.append(button)
+  const anchor = location || (features[0].geometry.type === 'Point' ? latlng(features[0].geometry.coordinates) : L.geoJSON(features).getBounds().getCenter())
+  L.popup({ maxWidth: 330 }).setLatLng(anchor).setContent(content).openOn(map)
+}
+function locate(id) {
+  candidates.value = []; clickLocation = null
+  enabled[layerType(airac.objects[id].type)] = true
+  syncLayers()
+  const features = featureSet(id)
+  if (features.length) {
+    if (features[0].geometry.type === 'Point') map.setView(latlng(features[0].geometry.coordinates), Math.max(map.getZoom(), 10))
+    else map.fitBounds(L.geoJSON(features).getBounds(), { padding: [40, 40], maxZoom: 12 })
+  }
+  choose(id)
+}
+function onClick(event) {
+  const location = event.latlng, p = map.latLngToLayerPoint(location), hits = []
+  for (const feature of data.value.features.values()) {
+    if (!enabled[layerType(feature.properties.type)]) continue
+    const coordinates = feature.geometry.coordinates
+    if (feature.geometry.type === 'Point') {
+      if (p.distanceTo(map.latLngToLayerPoint(latlng(coordinates))) <= 9) hits.unshift(feature.properties.id)
+    } else {
+      const a = map.latLngToLayerPoint(latlng(coordinates[0])), b = map.latLngToLayerPoint(latlng(coordinates[1]))
+      if (L.LineUtil.pointToSegmentDistance(p, a, b) <= 8) hits.push(feature.properties.id)
+    }
+  }
+  candidates.value = hits; clickLocation = location
+  if (hits.length) choose(hits[0], location)
+}
+function updateLabels() {
+  if (!map || !props.visible) return
+  const bounds = map.getBounds(), zoom = map.getZoom()
+  let count = 0
+  for (const [id, layer] of pointLayers) {
+    const type = airac.objects[id].type
+    if (enabled[type] && zoom >= (type === 'AirportHeliport' ? 7 : 10) && bounds.contains(layer.getLatLng()) && count < 80) { layer.openTooltip(); count++ }
+    else layer.closeTooltip()
+  }
+}
+function syncLayers() {
+  if (!map) return
+  for (const [type, group] of groups) {
+    if (enabled[type]) group.addTo(map)
+    else map.removeLayer(group)
+  }
+  if (selected.value && !enabled[layerType(selected.value.type)]) { highlight.clearLayers(); map.closePopup() }
+  else highlightSelection()
+  updateLabels()
+}
+function restyle() {
+  for (const [type, group] of groups) group.setStyle({ color: colors.value[type], fillColor: colors.value[type] })
+  highlightSelection()
+}
+function updateTileError(event) {
+  if (event.type === 'tileerror') failedTiles.add(event.tile)
+  else failedTiles.delete(event.tile)
+  tileError.value = failedTiles.size > 0
+}
+function retryTiles() { failedTiles.clear(); tileError.value = false; tiles.redraw() }
+async function initialize() {
+  if (!mounted || airac.status !== 'ready' || map || !props.visible) return
+  try {
+    if (!data.value) data.value = buildMapData(airac.objects, airac.relations)
+    await nextTick()
+    if (!mounted || !props.visible || !container.value || map) return
+    if (Boolean(tileUrl) !== Boolean(tileAttribution)) throw new Error('自定义底图必须同时配置 VITE_AIRAC_TILE_URL 和 VITE_AIRAC_TILE_ATTRIBUTION。')
+    tileHost.value = new URL(tileUrl || 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', window.location.href).host
+    if (!data.value.features.size) { mapError.value = '没有可用几何，无法计算初始地图范围。'; return }
+    map = L.map(container.value, { preferCanvas: true })
+    renderer = L.canvas({ padding: 0.5 })
+    tiles = L.tileLayer(tileUrl || 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19, attribution: tileAttribution || '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a>',
+    }).on('tileerror tileload tileunload', updateTileError).addTo(map)
+    for (const type of ['Route', ...mapTypes.slice(0, 3)]) {
+      const collection = data.value.collections[type === 'Route' ? 'RouteSegment' : type]
+      const group = L.geoJSON(collection, {
+        renderer, style: { color: colors.value[type], weight: 1.5, opacity: 0.65 },
+        pointToLayer: (feature, location) => L.circleMarker(location, { renderer, radius: type === 'AirportHeliport' ? 6 : type === 'Navaid' ? 5 : 3, color: colors.value[type], fillColor: colors.value[type], fillOpacity: 0.8, weight: 1 }),
+        onEachFeature: (feature, layer) => {
+          layer.bindTooltip(textNode(feature.properties.label), { direction: 'top' })
+          if (feature.geometry.type === 'Point') pointLayers.set(feature.properties.id, layer)
+        },
+      })
+      groups.set(type, group)
+      if (enabled[type]) group.addTo(map)
+    }
+    highlight = L.layerGroup().addTo(map)
+    const bounds = L.featureGroup([...groups.values()]).getBounds()
+    if (bounds.isValid()) map.fitBounds(bounds, { padding: [24, 24] })
+    map.on('click', onClick).on('zoomend moveend', updateLabels)
+    observer = new ResizeObserver(() => { map.invalidateSize({ pan: false }); updateLabels() })
+    observer.observe(container.value)
+    updateLabels()
+  } catch (error) {
+    mapError.value = `地图初始化失败：${error.message}`
+    observer?.disconnect(); map?.remove(); map = null
+    groups.clear(); pointLayers.clear()
+  }
+}
+watch(() => airac.status, initialize)
+watch(() => props.visible, async visible => {
+  if (!visible) return
+  await initialize(); await nextTick()
+  map?.invalidateSize({ pan: false }); updateLabels()
+})
+watch(enabled, syncLayers)
+watch(colors, restyle)
+onMounted(() => { mounted = true; initialize() })
+onBeforeUnmount(() => {
+  mounted = false; observer?.disconnect(); map?.remove()
+  failedTiles.clear()
+  groups.clear(); pointLayers.clear(); map = null
+})
+</script>

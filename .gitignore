@@ -12,6 +12,7 @@ public/data/index/
 .DS_Store
 Thumbs.db
 *.log
+.env.local
 
 # Generated AIRAC snapshots
 public/data/airac-index/

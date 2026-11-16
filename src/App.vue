@@ -19,7 +19,7 @@
       </button>
     </nav>
 
-    <aside class="sidebar" v-show="sidebarOpen">
+    <aside class="sidebar" v-show="sidebarOpen && !(store.tab === 'airac' && airacUI.view === 'map')">
       <div class="search-wrap" v-if="['charts', 'docs'].includes(store.tab)">
         <input v-model="store.search"
                :placeholder="store.tab === 'charts' ? '搜索机场 — ICAO / IATA / 名称' : '搜索资料文件'"
@@ -36,9 +36,13 @@
         <span class="ver" v-if="store.tab === 'airac'">AIRAC {{ airac.manifest?.pubNo }} {{ airac.manifest?.version }} · EFF {{ airac.manifest?.effectiveTime || '尚未加载' }}</span>
         <span class="ver" v-else>{{ store.meta.DataVersion }} · EFF {{ store.meta.EffectiveDate }}</span>
         <div class="vtitle">{{ store.tab === 'airac' ? 'AIRAC 数据' : store.viewer?.title }}</div>
+        <RadioGroup v-if="store.tab === 'airac'" v-model:value="airacUI.view" size="small" aria-label="AIRAC 视图">
+          <RadioButton value="data">数据浏览</RadioButton><RadioButton value="map">地图</RadioButton>
+        </RadioGroup>
       </header>
-      <AiracDetail v-if="store.tab === 'airac'"/>
-      <template v-else><div v-if="indexError" class="airac-legacy-error" role="alert">EAIP 索引加载失败：{{ indexError }}</div><PdfViewer v-if="['charts','docs'].includes(store.tab)" style="flex:1"/></template>
+      <AiracDetail v-if="store.tab === 'airac'" v-show="airacUI.view === 'data'"/>
+      <AiracMap v-if="store.tab === 'airac' && mapVisited" v-show="airacUI.view === 'map'" :visible="airacUI.view === 'map'" :theme="theme" @detail="airacUI.view = 'data'"/>
+      <template v-if="store.tab !== 'airac'"><div v-if="indexError" class="airac-legacy-error" role="alert">EAIP 索引加载失败：{{ indexError }}</div><PdfViewer v-if="['charts','docs'].includes(store.tab)" style="flex:1"/></template>
     </div>
   </div></ConfigProvider>
 </template>
@@ -51,10 +55,13 @@ import DocsPanel from './components/DocsPanel.vue'
 import PdfViewer from './components/PdfViewer.vue'
 import { store, loadJSON, dataURL } from './store.js'
 
-import { ConfigProvider, theme as antTheme } from 'ant-design-vue'
+import { ConfigProvider, RadioGroup, RadioButton, theme as antTheme } from 'ant-design-vue'
 import AiracTree from './components/AiracTree.vue'
 import AiracDetail from './components/AiracDetail.vue'
-import { airac, loadAirac } from './airac.js'
+import AiracMap from './components/AiracMap.vue'
+import { airac, airacUI, loadAirac } from './airac.js'
+const mapVisited = ref(false)
+watch(() => airacUI.view, view => { if (view === 'map') mapVisited.value = true }, { immediate: true })
 const indexError = ref('')
 const theme = ref(document.documentElement.dataset.theme || 'dark')
 const antConfig = computed(() => {
