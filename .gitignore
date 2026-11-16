@@ -17,6 +17,9 @@ Thumbs.db
 public/data/airac-index/
 __pycache__/
 
-# Original EAIP and AIRAC data
-public/data/eaip/
-Dataset/
+# Original EAIP and AIRAC data (keep directories, ignore contents)
+/public/data/eaip/*
+!/public/data/eaip/.gitkeep
+
+/Dataset/*
+!/Dataset/.gitkeep
