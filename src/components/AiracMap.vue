@@ -13,6 +13,11 @@
         </Checkbox>
         <Button @click="showDiagnostics = !showDiagnostics">地图诊断</Button>
       </div>
+      <div v-if="enabled.Route && data" class="airac-map-tools">
+        <span>航段导航要求：</span>
+        <Select v-model:value="navigationFilter" class="airac-map-navigation-filter" :options="navigationOptions" aria-label="航段导航要求筛选" />
+        <span class="airac-hint">显示 {{ filteredRouteCount }} / {{ data.collections.RouteSegment.features.length }} 个航段</span>
+      </div>
       <div v-if="enabled.Airspace && data" class="airac-map-tools">
         <Checkbox v-for="(name,type) in airspaceTypes" :key="type" v-model:checked="spaceEnabled[type]">{{ name }}（{{ data.collections.Airspace.features.filter(f => f.properties.airspaceType === type).length }}）</Checkbox>
       </div>
@@ -58,13 +63,16 @@
               </div>
             </template>
             <template v-if="selected.type === 'RouteSegment' && selectedFeature">
+              <p>可用方向：{{ directionText(selectedFeature) }}</p>
+              <p>导航类型：{{ propertyText(selected, 'navigationType') }}</p>
+              <p>所需导航性能：{{ propertyText(selected, 'requiredNavigationPerformance') }}</p>
               <p>所属航路：<Button type="link" @click="locate(selectedFeature.properties.routeId)">{{ label(airac.objects[selectedFeature.properties.routeId]) }}</Button></p>
-              <p class="airac-hint">已高亮所属航路的全部 {{ data.routes.get(selectedFeature.properties.routeId).length }} 个可绘制航段。</p>
+              <p class="airac-hint">已高亮所属航路符合筛选的 {{ featureSet(selectedFeature.properties.routeId).length }} 个可绘制航段。</p>
               <p v-for="key in ['startId','endId']" :key="key">{{ key === 'startId' ? '起点' : '终点' }}：
                 <Button type="link" @click="locate(selectedFeature.properties[key])">{{ label(airac.objects[selectedFeature.properties[key]]) }}</Button>
               </p>
             </template>
-            <p v-if="selected.type === 'Route'">可绘制航段：{{ data.routes.get(selected.id).length }}（高亮实际航段集合）</p>
+            <p v-if="selected.type === 'Route'">可绘制航段：{{ featureSet(selected.id).length }}（高亮实际航段集合）</p>
             <template v-if="selected.type === 'Navaid'">
               <p class="airac-hint">位置代表 Navaid 整体；设备参数和独立位置以设备原始数据为准。</p>
               <h3>关联设备（{{ data.equipment.get(selected.id).length }}）</h3>
@@ -88,23 +96,29 @@
           </template>
         </aside>
       </div>
-      <p class="airac-map-note">航路线仅表示端点关系，不代表实际飞行轨迹或可飞方向。空域按 XML 水平边界绘制，高度与参考面见对象详情；未支持的曲线见地图诊断。标签随放大显示；视野内最多显示 80 个标签。</p>
+      <p class="airac-map-note">航路线表示端点关系，箭头表示 XML 声明的可用方向（单向 / 双向），不代表实际飞行轨迹。航段过短时隐藏箭头，放大后显示。空域按 XML 水平边界绘制，高度与参考面见对象详情；未支持的曲线见地图诊断。RNAV / RNP 要求随航段标注显示。标签随放大显示；视野内最多显示 80 个标签。</p>
     </template>
   </section>
 </template>
 
 <script setup>
 import { computed, ref, shallowRef, reactive, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
-import { Alert, Button, Checkbox, Empty, Input, Result, Spin } from 'ant-design-vue'
+import { Alert, Button, Checkbox, Empty, Input, Result, Select, Spin } from 'ant-design-vue'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { airac, label, typeNames, fieldNames, openObject, loadAirac } from '../airac.js'
-import { buildMapData, searchMap, mapTypes, propertyText, airspaceTypes, airspaceType, airspaceVolumes, containsAirspace } from '../airac-map.js'
+import { buildMapData, searchMap, mapTypes, propertyText, airspaceTypes, airspaceType, airspaceVolumes, containsAirspace, routeArrowHeads, matchesRouteNavigation } from '../airac-map.js'
 
 const props = defineProps({ visible: Boolean, theme: String })
 const emit = defineEmits(['detail'])
 const container = ref(null), data = shallowRef(null)
 const query = ref(''), selectedId = ref(''), candidates = ref([]), showDiagnostics = ref(false)
+const navigationFilter = ref('ALL')
+const navigationOptions = computed(() => data.value ? [
+  { value: 'ALL', label: '全部航段' }, { value: 'RNAV', label: '全部 RNAV' }, { value: 'RNP', label: '全部 RNP' },
+  ...[...new Set(data.value.collections.RouteSegment.features.map(f => f.properties.navigationLabel).filter(Boolean))].sort().map(value => ({ value, label: value })),
+] : [])
+const filteredRouteCount = computed(() => data.value?.collections.RouteSegment.features.filter(matchesNavigation).length || 0)
 const enabled = reactive(Object.fromEntries(mapTypes.map(type => [type, true])))
 const spaceEnabled = reactive(Object.fromEntries(Object.keys(airspaceTypes).map(type => [type, true])))
 const altitudeKeys = ['lowerLimit', 'lowerLimitReference', 'upperLimit', 'upperLimitReference']
@@ -121,7 +135,11 @@ const matches = computed(() => data.value ? searchMap(data.value, query.value) :
 const selected = computed(() => airac.objects[selectedId.value])
 const selectedFeature = computed(() => data.value?.features.get(selectedId.value))
 const selectedServices = computed(() => selected.value?.type === 'Airspace' ? data.value.airspaceServices.get(selectedId.value) : [])
-const selectionReason = computed(() => data.value?.search.find(entry => entry.id === selectedId.value)?.reason || '')
+const selectionReason = computed(() => {
+  if (selected.value?.type === 'RouteSegment' && selectedFeature.value && !matchesNavigation(selectedFeature.value)) return '此航段不符合当前导航要求筛选条件'
+  if (selected.value?.type === 'Route' && !featureSet(selectedId.value).length && navigationFilter.value !== 'ALL') return '当前导航要求筛选下无可绘制航段'
+  return data.value?.search.find(entry => entry.id === selectedId.value)?.reason || ''
+})
 const hasFeatures = computed(() => data.value?.features.size > 0)
 const summaryKeys = computed(() => ({
   AirportHeliport: ['locationIndicatorICAO', 'designatorIATA', 'name', 'fieldElevation'],
@@ -135,11 +153,13 @@ const diagnosticGroups = computed(() => [
   ['合法缺失位置', data.value.diagnostics.missing],
   ['无效位置 / 关系错误', data.value.diagnostics.invalid],
   ['不可绘制航段', data.value.diagnostics.segments],
+  ['未绘制方向箭头', data.value.diagnostics.directions],
 ])
-let map, tiles, renderer, highlight, observer, mounted = false, clickLocation
-const groups = new Map(), pointLayers = new Map(), spaceLayers = new Map()
+let map, tiles, renderer, highlight, routeArrows, observer, mounted = false, clickLocation
+const groups = new Map(), pointLayers = new Map(), spaceLayers = new Map(), navigationLayers = new Map(), routeLayers = new Map()
 const layerType = type => type === 'RouteSegment' ? 'Route' : type
-const isEnabled = feature => enabled[layerType(feature.properties.type)] && (feature.properties.type !== 'Airspace' || spaceEnabled[feature.properties.airspaceType])
+const matchesNavigation = feature => matchesRouteNavigation(feature, navigationFilter.value)
+const isEnabled = feature => enabled[layerType(feature.properties.type)] && (feature.properties.type !== 'RouteSegment' || matchesNavigation(feature)) && (feature.properties.type !== 'Airspace' || spaceEnabled[feature.properties.airspaceType])
 const latlng = coordinates => L.latLng(coordinates[1], coordinates[0])
 const textNode = text => { const node = document.createElement('span'); node.textContent = text; return node }
 
@@ -163,29 +183,52 @@ function navaidTooltip(id) {
   content.append(title, navaidEquipment(id))
   return content
 }
+function directionText(feature) {
+  return { FORWARD: '起点 → 终点（正向）', BACKWARD: '终点 → 起点（反向）', BOTH: '起点 ↔ 终点（双向）' }[feature.properties.direction] || feature.properties.directionReason
+}
+function updateRouteArrows() {
+  if (!map || !routeArrows) return
+  routeArrows.clearLayers()
+  if (!props.visible || !enabled.Route) return
+  const bounds = L.bounds(map.containerPointToLayerPoint([0, 0]), map.containerPointToLayerPoint(map.getSize()))
+  const routeId = selected.value?.type === 'Route' ? selectedId.value : selected.value?.type === 'RouteSegment' ? selectedFeature.value?.properties.routeId : null
+  for (const feature of data.value.collections.RouteSegment.features) {
+    if (!feature.properties.direction || !matchesNavigation(feature)) continue
+    const [start, end] = feature.geometry.coordinates.map(c => map.latLngToLayerPoint(latlng(c)))
+    const clipped = L.LineUtil.clipSegment(start, end, bounds)
+    if (!clipped) continue
+    const heads = routeArrowHeads([clipped[0].x, clipped[0].y], [clipped[1].x, clipped[1].y], feature.properties.direction)
+    const selectedRoute = routeId === feature.properties.routeId
+    const color = selectedRoute ? (props.theme === 'dark' ? '#c43b16' : '#ad2809') : colors.value.Route
+    for (const head of heads) L.polyline(head.map(p => map.layerPointToLatLng(L.point(p))), {
+      renderer, interactive: false, color, weight: selectedRoute ? 2.5 : 1.5, opacity: 0.9,
+    }).addTo(routeArrows)
+  }
+}
 function detail(id) { openObject(id); emit('detail') }
 function featureSet(id) {
-  return airac.objects[id].type === 'Route' ? data.value.routes.get(id) : [data.value.features.get(id)].filter(Boolean)
+  return airac.objects[id].type === 'Route' ? data.value.routes.get(id).filter(matchesNavigation) : [data.value.features.get(id)].filter(f => f && (f.properties.type !== 'RouteSegment' || matchesNavigation(f)))
 }
 function highlightSelection() {
   if (!map) return
   highlight.clearLayers()
-  if (!selected.value) return
-  if (!enabled[layerType(selected.value.type)] || (selectedFeature.value && !isEnabled(selectedFeature.value))) return
+  if (!selected.value || !enabled[layerType(selected.value.type)] || (selectedFeature.value && !isEnabled(selectedFeature.value))) { updateRouteArrows(); return }
   const features = selected.value.type === 'RouteSegment'
-    ? data.value.routes.get(data.value.features.get(selectedId.value)?.properties.routeId) || []
+    ? (data.value.routes.get(data.value.features.get(selectedId.value)?.properties.routeId) || []).filter(matchesNavigation)
     : featureSet(selectedId.value)
   L.geoJSON(features, {
     renderer, interactive: false,
     style: { color: props.theme === 'dark' ? '#c43b16' : '#ad2809', weight: 5, opacity: 1 },
     pointToLayer: (feature, location) => L.circleMarker(location, { renderer, interactive: false, radius: 10, color: '#c43b16', weight: 3, fillOpacity: 0.25 }),
   }).addTo(highlight)
+  updateRouteArrows()
 }
 function choose(id, location) {
   const previous = airac.objects[selectedId.value]
   if (previous?.type === 'Navaid') pointLayers.get(previous.id)?.setTooltipContent(textNode(label(previous)))
   selectedId.value = id
   highlightSelection()
+  updateLabels()
   const object = airac.objects[id]
   const features = featureSet(id)
   if (!features.length) { map?.closePopup(); return }
@@ -211,9 +254,12 @@ function choose(id, location) {
   }
   if (object.type === 'RouteSegment') {
     const p = features[0].properties
+    addLine(`可用方向：${directionText(features[0])}`)
+    addLine(`导航类型：${propertyText(object, 'navigationType')}`)
+    addLine(`所需导航性能：${propertyText(object, 'requiredNavigationPerformance')}`)
     addLine(`航路：${label(airac.objects[p.routeId])}`)
     addLine(`起点：${label(airac.objects[p.startId])}；终点：${label(airac.objects[p.endId])}`)
-    addLine(`已高亮所属航路的 ${data.value.routes.get(p.routeId).length} 个可绘制航段。`)
+    addLine(`已高亮所属航路的 ${featureSet(p.routeId).length} 个符合筛选的航段。`)
   }
   if (object.type === 'Route') addLine(`高亮 ${features.length} 个实际航段`)
   if (candidates.value.length > 1) addLine(`此位置命中 ${candidates.value.length} 个对象，可在右侧选择其他对象。`)
@@ -260,6 +306,12 @@ function updateLabels() {
   if (!map || !props.visible) return
   const bounds = map.getBounds(), zoom = map.getZoom()
   let count = 0
+  const routeId = selected.value?.type === 'Route' ? selectedId.value : selectedFeature.value?.properties.routeId
+  for (const [id, layer] of navigationLayers) {
+    const feature = data.value.features.get(id)
+    if (enabled.Route && matchesNavigation(feature) && (zoom >= 7 || routeId === feature.properties.routeId) && bounds.contains(layer.getCenter()) && count < 80) { layer.openTooltip(); count++ }
+    else layer.closeTooltip()
+  }
   for (const [id, layer] of pointLayers) {
     const type = airac.objects[id].type
     if (enabled[type] && bounds.contains(layer.getLatLng()) && ((type === 'Navaid' && selectedId.value === id) || (zoom >= (type === 'AirportHeliport' ? 7 : 10) && count < 80))) { layer.openTooltip(); count++ }
@@ -277,12 +329,18 @@ function syncLayers() {
     if (Object.hasOwn(airspaceTypes, type) ? enabled.Airspace && spaceEnabled[type] : enabled[type]) group.addTo(map)
     else map.removeLayer(group)
   }
-  if (selected.value && (!enabled[layerType(selected.value.type)] || (selectedFeature.value && !isEnabled(selectedFeature.value)))) { highlight.clearLayers(); map.closePopup() }
+  for (const [id, layer] of routeLayers) {
+    if (matchesNavigation(data.value.features.get(id))) groups.get('Route').addLayer(layer)
+    else groups.get('Route').removeLayer(layer)
+  }
+  candidates.value = candidates.value.filter(id => isEnabled(data.value.features.get(id)))
+  if (selected.value && (!enabled[layerType(selected.value.type)] || (selectedFeature.value && !isEnabled(selectedFeature.value)))) { highlight.clearLayers(); map.closePopup(); updateRouteArrows() }
   else highlightSelection()
   updateLabels()
 }
 function restyle() {
   for (const [type, group] of groups) group.setStyle({ color: colors.value[Object.hasOwn(airspaceTypes, type) ? 'Airspace' : type], fillColor: colors.value[Object.hasOwn(airspaceTypes, type) ? 'Airspace' : type] })
+  for (const layer of routeLayers.values()) layer.setStyle({ color: colors.value.Route })
   highlightSelection()
 }
 function updateTileError(event) {
@@ -324,7 +382,9 @@ async function initialize() {
         renderer, style: { color: colors.value[type], weight: 1.5, opacity: 0.65 },
         pointToLayer: (feature, location) => L.circleMarker(location, { renderer, radius: type === 'AirportHeliport' ? 6 : type === 'Navaid' ? 5 : 3, color: colors.value[type], fillColor: colors.value[type], fillOpacity: 0.8, weight: 1 }),
         onEachFeature: (feature, layer) => {
-          layer.bindTooltip(textNode(feature.properties.label), { direction: 'top' })
+          layer.bindTooltip(textNode(feature.properties.navigationLabel ? `${feature.properties.label} · ${feature.properties.navigationLabel}` : feature.properties.label), { direction: 'top' })
+          if (type === 'Route') routeLayers.set(feature.properties.id, layer)
+          if (type === 'Route' && feature.properties.navigationLabel) navigationLayers.set(feature.properties.id, layer)
           if (type === 'Navaid') {
             layer.on('mouseover', () => layer.setTooltipContent(navaidTooltip(feature.properties.id)).openTooltip())
             layer.on('mouseout', () => {
@@ -337,25 +397,27 @@ async function initialize() {
       groups.set(type, group)
       if (Object.hasOwn(airspaceTypes, type) ? enabled.Airspace && spaceEnabled[type] : enabled[type]) group.addTo(map)
     }
+    routeArrows = L.layerGroup().addTo(map)
     highlight = L.layerGroup().addTo(map)
     const bounds = L.featureGroup([...groups.values()]).getBounds()
     if (bounds.isValid()) map.fitBounds(bounds, { padding: [24, 24] })
-    map.on('click', onClick).on('zoomend moveend', updateLabels)
+    map.on('click', onClick).on('zoomend moveend', () => { updateLabels(); updateRouteArrows() })
     observer = new ResizeObserver(() => { map.invalidateSize({ pan: false }); updateLabels() })
     observer.observe(container.value)
-    updateLabels()
+    updateLabels(); updateRouteArrows()
   } catch (error) {
     mapError.value = `地图初始化失败：${error.message}`
     observer?.disconnect(); map?.remove(); map = null
-    groups.clear(); pointLayers.clear(); spaceLayers.clear()
+    groups.clear(); pointLayers.clear(); spaceLayers.clear(); navigationLayers.clear(); routeLayers.clear()
   }
 }
 watch(() => airac.status, initialize)
 watch(() => props.visible, async visible => {
   if (!visible) return
   await initialize(); await nextTick()
-  map?.invalidateSize({ pan: false }); updateLabels()
+  map?.invalidateSize({ pan: false }); updateLabels(); updateRouteArrows()
 })
+watch(navigationFilter, () => { map?.closePopup(); syncLayers() })
 watch(enabled, syncLayers)
 watch(spaceEnabled, syncLayers)
 watch(colors, restyle)
@@ -363,6 +425,6 @@ onMounted(() => { mounted = true; initialize() })
 onBeforeUnmount(() => {
   mounted = false; observer?.disconnect(); map?.remove()
   failedTiles.clear()
-  groups.clear(); pointLayers.clear(); spaceLayers.clear(); map = null
+  groups.clear(); pointLayers.clear(); spaceLayers.clear(); navigationLayers.clear(); routeLayers.clear(); map = null
 })
 </script>

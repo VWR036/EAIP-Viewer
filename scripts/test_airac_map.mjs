@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import { buildMapData, position, searchMap, airspaceGeometry, containsAirspace, airspaceVolumes, propertyText, buildAirspaceServices } from '../src/airac-map.js'
+import { buildMapData, position, searchMap, airspaceGeometry, containsAirspace, airspaceVolumes, propertyText, buildAirspaceServices, routeDirection, routeArrowHeads, routeNavigationLabel, matchesRouteNavigation } from '../src/airac-map.js'
 
 const A = 'http://www.aixm.aero/schema/5.1.1', G = 'http://www.opengis.net/gml/3.2'
 const NIL = '{http://www.w3.org/2001/XMLSchema-instance}nil'
@@ -127,9 +127,20 @@ test('local snapshot geometry and every effective segment match their real endpo
   const data = buildMapData(objects, relations)
   assert.equal(data.diagnostics.invalid.filter(d => d.type !== 'Airspace').length, 0)
   assert.equal(data.diagnostics.segments.length, 0)
+  assert.equal(data.diagnostics.directions.length, 0)
   for (const type of ['AirportHeliport','DesignatedPoint']) assert.equal(data.collections[type].features.length, manifest.counts[type])
   assert.equal(data.collections.Navaid.features.length + data.diagnostics.counts.Navaid.missing, manifest.counts.Navaid)
   assert.equal(data.collections.RouteSegment.features.length, manifest.counts.RouteSegment)
+  assert.equal(data.collections.RouteSegment.features.filter(f => f.properties.navigationLabel).length, 175)
+  for (const [filter, count] of [['ALL',2624],['RNAV',121],['RNP',54],['RNAV 1.0',30],['RNAV 2.0',91],['RNP 1.0',7],['RNP 2.0',1],['RNP 4.0',41],['RNP 10.0',5]]) {
+    const features = data.collections.RouteSegment.features.filter(f => matchesRouteNavigation(f, filter))
+    assert.equal(features.length, count, filter)
+    for (const feature of features) {
+      const fields = objects[feature.properties.id].fields
+      if (filter !== 'ALL') assert.equal(fields.navigationType, filter.startsWith('RNAV') ? 'RNAV' : 'OTHER:RNP')
+      if (filter.includes(' ')) assert.equal(fields.requiredNavigationPerformance, filter.split(' ')[1])
+    }
+  }
   const spaces = data.diagnostics.counts.Airspace
   assert.equal(spaces.drawn + spaces.missing + spaces.invalid, manifest.counts.Airspace)
   for (const prefix of ['ZSSSAR', 'ZSSSAP']) {
@@ -148,6 +159,12 @@ test('local snapshot geometry and every effective segment match their real endpo
   assert.equal(propertyText({ properties: volume }, 'lowerLimit'), 'GND')
   assert.equal(propertyText({ properties: volume }, 'upperLimit'), '12500 M')
   for (const f of data.collections.RouteSegment.features) {
+    const availability = objects[f.properties.id].properties.children.find(n => n.name === 'availability')
+    const direction = availability.children[0].children.find(n => n.name === 'direction').text
+    assert.equal(f.properties.direction, direction)
+    const navigation = objects[f.properties.id].properties.children.find(n => n.name === 'navigationType')
+    const performance = objects[f.properties.id].properties.children.find(n => n.name === 'requiredNavigationPerformance')
+    assert.equal(f.properties.navigationLabel, navigation.text ? `${navigation.text === 'OTHER:RNP' ? 'RNP' : navigation.text} ${performance.text}` : '')
     for (const [index,role] of ['start','end'].entries()) {
       const r = relations.references.find(r => r.active && r.sourceId === f.properties.id && r.role === role && ['pointChoice_fixDesignatedPoint','pointChoice_navaidSystem'].includes(r.field))
       assert.equal(f.properties[`${role}Id`], r.targetId)
@@ -260,4 +277,60 @@ test('snapshot airspace communications match effective XML references and Shangh
   assert.equal(objects[service.unitIds[0]].name, 'SHANGHAI ACC')
   assert.equal(service.callsigns[0].callSign, 'SHANGHAI CONTROL')
   assert.deepEqual(service.channels.map(c => [c.rank, c.transmission, c.reception]), [['PRIMARY', '120.75 MHZ', '120.75 MHZ'], ['ALTERNATE', '134.0 MHZ', '134.0 MHZ']])
+})
+
+
+test('route arrows use availability direction rather than endpoint order or magnetic track', () => {
+  const objects = { a: object('a','DesignatedPoint','20 100'), b: object('b','DesignatedPoint','21 101'), r: object('r','Route'), s: object('s','RouteSegment') }
+  const references = segmentRefs('s','a','b','r')
+  for (const direction of ['FORWARD','BACKWARD','BOTH']) {
+    objects.s.properties.children = [node('availability', [node('RouteAvailability', [node('direction', [], direction)])])]
+    const data = buildMapData(objects, { references })
+    assert.equal(data.features.get('s').properties.direction, direction)
+    assert.deepEqual(data.features.get('s').geometry.coordinates, [[100,20],[101,21]])
+    assert.equal(data.diagnostics.directions.length, 0)
+  }
+  objects.s.properties.children = []
+  assert.equal(routeDirection(objects.s).status, 'missing')
+  for (const field of [node('direction', [], 'UNKNOWN'), node('direction', [], '', { [NIL]: 'true', nilReason: 'unknown' })]) {
+    objects.s.properties.children = [node('availability', [node('RouteAvailability', [field])])]
+    const data = buildMapData(objects, { references })
+    assert.equal(data.features.get('s').properties.direction, undefined)
+    assert.ok(data.features.get('s').properties.directionReason)
+    assert.equal(data.diagnostics.directions.length, 1)
+  }
+})
+
+test('screen-space arrowheads point forward, backward and both ways across map orientations', () => {
+  for (const [start,end] of [[[0,0],[100,0]],[[0,0],[0,100]],[[100,100],[0,0]]]) {
+    const dx=end[0]-start[0], dy=end[1]-start[1]
+    for (const direction of ['FORWARD','BACKWARD','BOTH']) {
+      const heads=routeArrowHeads(start,end,direction)
+      assert.equal(heads.length, direction === 'BOTH' ? 2 : 1)
+      for (const [i,head] of heads.entries()) {
+        const base=[(head[0][0]+head[2][0])/2,(head[0][1]+head[2][1])/2]
+        const dot=(head[1][0]-base[0])*dx+(head[1][1]-base[1])*dy
+        assert.equal(dot > 0, direction === 'FORWARD' || (direction === 'BOTH' && i === 1))
+        assert.ok(Math.abs(Math.hypot(head[1][0]-base[0],head[1][1]-base[1])-7)<1e-10)
+      }
+    }
+  }
+  assert.deepEqual(routeArrowHeads([0,0],[10,0],'BOTH'), [])
+  assert.deepEqual(routeArrowHeads([0,0],[0,0],'FORWARD'), [])
+  assert.throws(() => routeArrowHeads([0,0],[100,0],'UNKNOWN'), /不支持/)
+})
+
+
+test('navigation labels distinguish RNAV from RNP and preserve explicit missing performance', () => {
+  const segment = object('s','RouteSegment')
+  segment.properties.children = [node('navigationType', [], 'OTHER:RNP'), node('requiredNavigationPerformance', [], '4.0')]
+  assert.equal(routeNavigationLabel(segment), 'RNP 4.0')
+  segment.properties.children[0].text = 'RNAV'
+  assert.equal(routeNavigationLabel(segment), 'RNAV 4.0')
+  segment.properties.children[1] = node('requiredNavigationPerformance', [], '', { [NIL]: 'true', nilReason: 'unknown' })
+  assert.equal(routeNavigationLabel(segment), 'RNAV nil · unknown')
+  segment.properties.children[0] = node('navigationType', [], '', { [NIL]: 'true', nilReason: 'unknown' })
+  assert.equal(routeNavigationLabel(segment), '')
+  segment.properties.children = []
+  assert.equal(routeNavigationLabel(segment), '')
 })

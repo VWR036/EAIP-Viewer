@@ -339,6 +339,7 @@ body {
 .airac-map .ant-alert-message { color:var(--text); }
 .airac-map-tools { display:flex; align-items:center; flex-wrap:wrap; gap:8px 12px; padding:10px 12px; border-bottom:1px solid var(--line); }
 .airac-map-tools .ant-input-affix-wrapper { flex:1; min-width:220px; max-width:520px; }
+.airac-map-tools .airac-map-navigation-filter { width:150px; flex-shrink:0; }
 .airac-map-key { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:5px; }
 .airac-map-content { flex:1; min-height:0; display:flex; }
 .airac-map-canvas { flex:1; min-width:0; height:100%; background:var(--stage); }

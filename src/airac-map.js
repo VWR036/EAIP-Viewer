@@ -119,6 +119,41 @@ export function propertyText(object, key) {
   return nodes.map(n => nil(n) ? `nil · ${n.attributes.nilReason || '未提供 nilReason'}` : `${n.text || '空字符串'}${n.attributes.uom ? ` ${n.attributes.uom}` : ''}`).join('；')
 }
 
+export function routeDirection(object) {
+  if (!children(object.properties, 'availability').length) return { status: 'missing', reason: '缺少航段可用方向 availability' }
+  try {
+    const direction = one(one(one(object.properties, 'availability'), 'RouteAvailability'), 'direction').text
+    if (!['FORWARD', 'BACKWARD', 'BOTH'].includes(direction)) throw new Error(`不支持的航段可用方向：${direction}`)
+    return { status: 'valid', direction }
+  } catch (error) { return { status: 'invalid', reason: error.message } }
+}
+
+export function routeNavigationLabel(object) {
+  const types = children(object.properties, 'navigationType').filter(n => !nil(n) && n.text)
+  if (!types.length) return ''
+  const navigation = types.map(n => n.text === 'OTHER:RNP' ? 'RNP' : n.text).join('；')
+  return `${navigation} ${propertyText(object, 'requiredNavigationPerformance')}`
+}
+
+export function matchesRouteNavigation(feature, filter) {
+  if (filter === 'ALL') return true
+  if (filter === 'RNAV' || filter === 'RNP') return feature.properties.navigationLabel.startsWith(`${filter} `)
+  return feature.properties.navigationLabel === filter
+}
+
+// Arrowheads in screen pixels keep their size when the map zoom changes.
+export function routeArrowHeads(start, end, direction) {
+  if (!['FORWARD', 'BACKWARD', 'BOTH'].includes(direction)) throw new Error(`不支持的航段可用方向：${direction}`)
+  const dx = end[0] - start[0], dy = end[1] - start[1], length = Math.hypot(dx, dy)
+  if (length < 30) return []
+  const ux = dx / length, uy = dy / length
+  const heads = direction === 'BOTH' ? [[0.35, -1], [0.65, 1]] : [[0.5, direction === 'FORWARD' ? 1 : -1]]
+  return heads.map(([t, sign]) => {
+    const x = start[0] + dx * t, y = start[1] + dy * t
+    return [[x - sign * ux * 7 - uy * 4, y - sign * uy * 7 + ux * 4], [x, y], [x - sign * ux * 7 + uy * 4, y - sign * uy * 7 - ux * 4]]
+  })
+}
+
 export function buildAirspaceServices(objects, relations) {
   const services = new Map(), airspaces = new Map()
   for (const o of Object.values(objects)) {
@@ -151,7 +186,7 @@ export function buildAirspaceServices(objects, relations) {
 export function buildMapData(objects, relations) {
   const collections = Object.fromEntries([...mapTypes.slice(0, 3), 'RouteSegment', 'Airspace'].map(type => [type, { type: 'FeatureCollection', features: [] }]))
   const positions = new Map(), features = new Map(), segments = new Map(), routes = new Map(), equipment = new Map()
-  const diagnostics = { missing: [], invalid: [], segments: [], counts: {} }
+  const diagnostics = { missing: [], invalid: [], segments: [], directions: [], counts: {} }
   const active = Object.values(objects).filter(o => o.active === true)
   for (const o of active) {
     if (o.type === 'Route') routes.set(o.id, [])
@@ -215,7 +250,9 @@ export function buildMapData(objects, relations) {
       continue
     }
     const [startId] = refs.start, [endId] = refs.end, [routeId] = refs.route
-    const feature = { type: 'Feature', geometry: { type: 'LineString', coordinates: [positions.get(startId).coordinates, positions.get(endId).coordinates] }, properties: { id, type: 'RouteSegment', routeId, startId, endId, label: label(objects[routeId]) } }
+    const direction = routeDirection(objects[id])
+    if (direction.status !== 'valid') diagnostics.directions.push({ id, type: 'RouteSegment', reason: direction.reason })
+    const feature = { type: 'Feature', geometry: { type: 'LineString', coordinates: [positions.get(startId).coordinates, positions.get(endId).coordinates] }, properties: { id, type: 'RouteSegment', routeId, startId, endId, direction: direction.direction, directionReason: direction.reason, navigationLabel: routeNavigationLabel(objects[id]), label: label(objects[routeId]) } }
     collections.RouteSegment.features.push(feature)
     features.set(id, feature)
     routes.get(routeId).push(feature)
