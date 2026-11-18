@@ -143,6 +143,26 @@ const isEnabled = feature => enabled[layerType(feature.properties.type)] && (fea
 const latlng = coordinates => L.latLng(coordinates[1], coordinates[0])
 const textNode = text => { const node = document.createElement('span'); node.textContent = text; return node }
 
+function navaidEquipment(id) {
+  const content = document.createElement('div')
+  const ids = data.value.equipment.get(id)
+  if (!ids.length) content.append(textNode('数据集未提供关联导航设备。'))
+  for (const deviceId of ids) {
+    const device = airac.objects[deviceId]
+    const row = document.createElement('div')
+    const key = device.type === 'DME' ? 'channel' : 'frequency'
+    row.textContent = `${typeNames[device.type]} · ${label(device)} · ${key === 'channel' ? '频道' : '频率'}：${propertyText(device, key)}`
+    content.append(row)
+  }
+  return content
+}
+function navaidTooltip(id) {
+  const content = document.createElement('div')
+  const title = document.createElement('strong')
+  title.textContent = label(airac.objects[id])
+  content.append(title, navaidEquipment(id))
+  return content
+}
 function detail(id) { openObject(id); emit('detail') }
 function featureSet(id) {
   return airac.objects[id].type === 'Route' ? data.value.routes.get(id) : [data.value.features.get(id)].filter(Boolean)
@@ -162,6 +182,8 @@ function highlightSelection() {
   }).addTo(highlight)
 }
 function choose(id, location) {
+  const previous = airac.objects[selectedId.value]
+  if (previous?.type === 'Navaid') pointLayers.get(previous.id)?.setTooltipContent(textNode(label(previous)))
   selectedId.value = id
   highlightSelection()
   const object = airac.objects[id]
@@ -175,6 +197,10 @@ function choose(id, location) {
   addLine(`${typeNames[object.type]} · ${id}`)
   const keys = { AirportHeliport: ['locationIndicatorICAO', 'designatorIATA', 'fieldElevation'], DesignatedPoint: ['designator', 'type'], Navaid: ['designator', 'type'], RouteSegment: ['length', 'magneticTrack', 'reverseMagneticTrack'] }[object.type] || []
   for (const key of keys) addLine(`${fieldNames[key] || key}：${propertyText(object, key)}`)
+  if (object.type === 'Navaid') {
+    content.append(navaidEquipment(id))
+    pointLayers.get(id)?.setTooltipContent(navaidTooltip(id)).openTooltip()
+  }
   if (object.type === 'Airspace') {
     addLine(`类型：${object.fields.type}`)
     addLine(`关联空管服务：${selectedServices.value.length} 项；管制单位、呼号和收发频率见右侧面板。`)
@@ -236,7 +262,7 @@ function updateLabels() {
   let count = 0
   for (const [id, layer] of pointLayers) {
     const type = airac.objects[id].type
-    if (enabled[type] && zoom >= (type === 'AirportHeliport' ? 7 : 10) && bounds.contains(layer.getLatLng()) && count < 80) { layer.openTooltip(); count++ }
+    if (enabled[type] && bounds.contains(layer.getLatLng()) && ((type === 'Navaid' && selectedId.value === id) || (zoom >= (type === 'AirportHeliport' ? 7 : 10) && count < 80))) { layer.openTooltip(); count++ }
     else layer.closeTooltip()
   }
   for (const [id, layer] of spaceLayers) {
@@ -299,6 +325,12 @@ async function initialize() {
         pointToLayer: (feature, location) => L.circleMarker(location, { renderer, radius: type === 'AirportHeliport' ? 6 : type === 'Navaid' ? 5 : 3, color: colors.value[type], fillColor: colors.value[type], fillOpacity: 0.8, weight: 1 }),
         onEachFeature: (feature, layer) => {
           layer.bindTooltip(textNode(feature.properties.label), { direction: 'top' })
+          if (type === 'Navaid') {
+            layer.on('mouseover', () => layer.setTooltipContent(navaidTooltip(feature.properties.id)).openTooltip())
+            layer.on('mouseout', () => {
+              if (selectedId.value !== feature.properties.id) layer.setTooltipContent(textNode(feature.properties.label))
+            })
+          }
           if (feature.geometry.type === 'Point') pointLayers.set(feature.properties.id, layer)
         },
       })
