@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import { buildMapData, position, searchMap, airspaceGeometry, containsAirspace, airspaceVolumes, propertyText } from '../src/airac-map.js'
+import { buildMapData, position, searchMap, airspaceGeometry, containsAirspace, airspaceVolumes, propertyText, buildAirspaceServices } from '../src/airac-map.js'
 
 const A = 'http://www.aixm.aero/schema/5.1.1', G = 'http://www.opengis.net/gml/3.2'
 const NIL = '{http://www.w3.org/2001/XMLSchema-instance}nil'
@@ -201,4 +201,63 @@ test('unsupported, malformed and unclosed airspace boundaries are diagnosed with
     assert.equal(data.diagnostics.invalid.length, 1)
     assert.ok(searchMap(data, 'testar01').results[0].reason)
   }
+})
+
+
+test('airspace services retain per-service units, callsigns and ranked transmit/receive channels', () => {
+  const space = object('space', 'Airspace'), other = object('other', 'Airspace')
+  const service = object('service', 'AirTrafficControlService'), second = object('second', 'AirTrafficControlService')
+  service.properties.children.push(node('call-sign', [node('CallsignDetail', [node('callSign', [], 'TEST CONTROL'), node('language', [], 'eng')])]))
+  second.properties.children.push(node('call-sign', [], '', { [NIL]: 'true', nilReason: 'unknown' }))
+  const unit = object('unit', 'Unit', undefined, { name: 'TEST ACC' }), otherUnit = object('otherUnit', 'Unit')
+  const primary = object('primary', 'RadioCommunicationChannel'), alternate = object('alternate', 'RadioCommunicationChannel')
+  primary.properties.children.push(node('rank', [], 'PRIMARY'), node('frequencyTransmission', [], '120.75', { uom: 'MHZ' }), node('frequencyReception', [], '121.0', { uom: 'MHZ' }))
+  alternate.properties.children.push(node('rank', [], 'ALTERNATE'), node('frequencyTransmission', [], '', { [NIL]: 'true', nilReason: 'unknown' }))
+  const inactive = object('inactive', 'AirTrafficControlService'); inactive.active = false
+  const objects = { space, other, service, second, unit, otherUnit, primary, alternate, inactive }
+  const references = [
+    relation('service', 'space', 'clientAirspace'), relation('service', 'space', 'clientAirspace'),
+    relation('service', 'unit', 'serviceProvider'), relation('service', 'unit', 'serviceProvider'),
+    relation('service', 'alternate', 'radioCommunication'), relation('service', 'primary', 'radioCommunication'), relation('service', 'primary', 'radioCommunication'),
+    relation('second', 'space', 'clientAirspace'), relation('second', 'otherUnit', 'serviceProvider'),
+    relation('second', 'primary', 'radioCommunication', null, false), relation('inactive', 'space', 'clientAirspace', null, false),
+  ]
+  const data = buildAirspaceServices(objects, { references })
+  assert.deepEqual(data.get('other'), [])
+  assert.equal(data.get('space').length, 2)
+  const [first, next] = data.get('space')
+  assert.deepEqual(first.unitIds, ['unit'])
+  assert.deepEqual(first.callsigns, [{ callSign: 'TEST CONTROL', language: 'eng' }])
+  assert.deepEqual(first.channels.map(c => c.id), ['primary', 'alternate'])
+  assert.equal(first.channels[0].transmission, '120.75 MHZ')
+  assert.equal(first.channels[0].reception, '121.0 MHZ')
+  assert.equal(first.channels[1].transmission, 'nil · unknown')
+  assert.equal(first.channels[1].reception, '字段未提供')
+  assert.deepEqual(next.unitIds, ['otherUnit'])
+  assert.deepEqual(next.channels, [])
+  assert.equal(next.callsignStatus, 'nil · unknown')
+  assert.throws(() => buildAirspaceServices(objects, { references: [relation('service', 'missing', 'radioCommunication')] }), /空管服务引用错误/)
+})
+
+test('snapshot airspace communications match effective XML references and Shanghai AR33 values', t => {
+  const base = new URL('../public/data/airac-index/', import.meta.url)
+  if (!fs.existsSync(new URL('manifest.json', base))) { t.skip('本地 AIRAC 索引未提供'); return }
+  const manifest = JSON.parse(fs.readFileSync(new URL('manifest.json', base)))
+  const objects = JSON.parse(fs.readFileSync(new URL(manifest.objectsFile, base)))
+  const relations = JSON.parse(fs.readFileSync(new URL(manifest.relationsFile, base)))
+  const data = buildAirspaceServices(objects, relations)
+  const refs = relations.references.filter(r => r.active)
+  for (const [id, services] of data) {
+    assert.deepEqual(services.map(s => s.id), [...new Set(refs.filter(r => r.field === 'clientAirspace' && r.targetId === id).map(r => r.sourceId))])
+    for (const service of services) {
+      for (const [field, ids] of [['serviceProvider', service.unitIds], ['radioCommunication', service.channels.map(c => c.id)]]) {
+        assert.deepEqual([...ids].sort(), [...new Set(refs.filter(r => r.sourceId === service.id && r.field === field).map(r => r.targetId))].sort())
+      }
+    }
+  }
+  const ar33 = Object.values(objects).find(o => o.fields.designator === 'ZSSSAR33')
+  const [service] = data.get(ar33.id)
+  assert.equal(objects[service.unitIds[0]].name, 'SHANGHAI ACC')
+  assert.equal(service.callsigns[0].callSign, 'SHANGHAI CONTROL')
+  assert.deepEqual(service.channels.map(c => [c.rank, c.transmission, c.reception]), [['PRIMARY', '120.75 MHZ', '120.75 MHZ'], ['ALTERNATE', '134.0 MHZ', '134.0 MHZ']])
 })

@@ -119,6 +119,35 @@ export function propertyText(object, key) {
   return nodes.map(n => nil(n) ? `nil · ${n.attributes.nilReason || '未提供 nilReason'}` : `${n.text || '空字符串'}${n.attributes.uom ? ` ${n.attributes.uom}` : ''}`).join('；')
 }
 
+export function buildAirspaceServices(objects, relations) {
+  const services = new Map(), airspaces = new Map()
+  for (const o of Object.values(objects)) {
+    if (!o.active) continue
+    if (o.type === 'Airspace') airspaces.set(o.id, new Set())
+    if (o.type === 'AirTrafficControlService') services.set(o.id, { units: new Set(), channels: new Set() })
+  }
+  const targetTypes = { clientAirspace: 'Airspace', serviceProvider: 'Unit', radioCommunication: 'RadioCommunicationChannel' }
+  for (const r of relations.references) {
+    if (!r.active || !services.has(r.sourceId) || !targetTypes[r.field]) continue
+    const target = objects[r.targetId]
+    if (target?.active !== true || target.type !== targetTypes[r.field]) throw new Error(`空管服务引用错误：${r.sourceId} · ${r.field} → ${r.targetId}`)
+    if (r.field === 'clientAirspace') airspaces.get(target.id).add(r.sourceId)
+    else services.get(r.sourceId)[r.field === 'serviceProvider' ? 'units' : 'channels'].add(target.id)
+  }
+  const summaries = new Map([...services].map(([id, refs]) => {
+    const service = objects[id]
+    const callsigns = children(service.properties, 'call-sign').flatMap(n => children(n, 'CallsignDetail')).map(n => ({
+      callSign: propertyText({ properties: n }, 'callSign'), language: propertyText({ properties: n }, 'language'),
+    }))
+    const channels = [...refs.channels].map(channelId => {
+      const channel = objects[channelId]
+      return { id: channelId, rank: propertyText(channel, 'rank'), transmission: propertyText(channel, 'frequencyTransmission'), reception: propertyText(channel, 'frequencyReception') }
+    }).sort((a, b) => (a.rank === 'PRIMARY' ? 0 : a.rank === 'ALTERNATE' ? 1 : 2) - (b.rank === 'PRIMARY' ? 0 : b.rank === 'ALTERNATE' ? 1 : 2))
+    return [id, { id, unitIds: [...refs.units], callsigns, callsignStatus: callsigns.length ? '' : propertyText(service, 'call-sign'), channels }]
+  }))
+  return new Map([...airspaces].map(([id, ids]) => [id, [...ids].map(serviceId => summaries.get(serviceId))]))
+}
+
 export function buildMapData(objects, relations) {
   const collections = Object.fromEntries([...mapTypes.slice(0, 3), 'RouteSegment', 'Airspace'].map(type => [type, { type: 'FeatureCollection', features: [] }]))
   const positions = new Map(), features = new Map(), segments = new Map(), routes = new Map(), equipment = new Map()
@@ -203,7 +232,7 @@ export function buildMapData(objects, relations) {
     text: [label(o), o.fields.designatorIATA, o.fields.name].filter(Boolean).join(' ').toLowerCase(),
     reason: o.type === 'Route' ? (routes.get(o.id).length ? '' : '此航路没有可绘制航段，请查看航段诊断') : reasons.get(o.id) || '',
   }))
-  return { collections, positions, features, routes, equipment, diagnostics, search, reasons }
+  return { collections, positions, features, routes, equipment, diagnostics, search, reasons, airspaceServices: buildAirspaceServices(objects, relations) }
 }
 
 export function searchMap(data, query, limit = 50) {

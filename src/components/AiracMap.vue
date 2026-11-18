@@ -43,6 +43,19 @@
                 <h3>空域高度范围{{ airspaceVolumes(selected).length > 1 ? `（${i + 1}）` : '' }}</h3>
                 <p v-for="key in altitudeKeys" :key="key">{{ fieldNames[key] }}：{{ propertyText({ properties: volume }, key) }}</p>
               </div>
+              <h3>管制单位与通信（{{ selectedServices.length }} 项服务）</h3>
+              <p v-if="!selectedServices.length" class="airac-hint">数据集未提供此空域的关联空管服务。</p>
+              <div v-for="(service,i) in selectedServices" :key="service.id">
+                <h3>空管服务 {{ i + 1 }} <Button type="link" @click="detail(service.id)">查看服务详情</Button></h3>
+                <p>管制单位：<span v-if="!service.unitIds.length">字段未提供</span><Button v-for="id in service.unitIds" :key="id" type="link" @click="detail(id)">{{ label(airac.objects[id]) }}</Button></p>
+                <p v-if="!service.callsigns.length">呼号：{{ service.callsignStatus }}</p>
+                <p v-for="(callsign,j) in service.callsigns" :key="j">呼号：{{ callsign.callSign }}（语言：{{ callsign.language }}）</p>
+                <p v-if="!service.channels.length" class="airac-hint">数据集未提供此服务的关联通信频道。</p>
+                <div v-for="channel in service.channels" :key="channel.id">
+                  <p>{{ channelRanks[channel.rank] || channel.rank }} <Button type="link" @click="detail(channel.id)">查看频道详情</Button></p>
+                  <p>发射频率：{{ channel.transmission }}；接收频率：{{ channel.reception }}</p>
+                </div>
+              </div>
             </template>
             <template v-if="selected.type === 'RouteSegment' && selectedFeature">
               <p>所属航路：<Button type="link" @click="locate(selectedFeature.properties.routeId)">{{ label(airac.objects[selectedFeature.properties.routeId]) }}</Button></p>
@@ -95,6 +108,7 @@ const query = ref(''), selectedId = ref(''), candidates = ref([]), showDiagnosti
 const enabled = reactive(Object.fromEntries(mapTypes.map(type => [type, true])))
 const spaceEnabled = reactive(Object.fromEntries(Object.keys(airspaceTypes).map(type => [type, true])))
 const altitudeKeys = ['lowerLimit', 'lowerLimitReference', 'upperLimit', 'upperLimitReference']
+const channelRanks = { PRIMARY: '主用', ALTERNATE: '备用' }
 const tileError = ref(false), mapError = ref('')
 const tileUrl = import.meta.env.VITE_AIRAC_TILE_URL
 const tileAttribution = import.meta.env.VITE_AIRAC_TILE_ATTRIBUTION
@@ -106,6 +120,7 @@ const colors = computed(() => props.theme === 'dark'
 const matches = computed(() => data.value ? searchMap(data.value, query.value) : { results: [], total: 0 })
 const selected = computed(() => airac.objects[selectedId.value])
 const selectedFeature = computed(() => data.value?.features.get(selectedId.value))
+const selectedServices = computed(() => selected.value?.type === 'Airspace' ? data.value.airspaceServices.get(selectedId.value) : [])
 const selectionReason = computed(() => data.value?.search.find(entry => entry.id === selectedId.value)?.reason || '')
 const hasFeatures = computed(() => data.value?.features.size > 0)
 const summaryKeys = computed(() => ({
@@ -162,6 +177,7 @@ function choose(id, location) {
   for (const key of keys) addLine(`${fieldNames[key] || key}：${propertyText(object, key)}`)
   if (object.type === 'Airspace') {
     addLine(`类型：${object.fields.type}`)
+    addLine(`关联空管服务：${selectedServices.value.length} 项；管制单位、呼号和收发频率见右侧面板。`)
     for (const [i, volume] of airspaceVolumes(object).entries()) {
       addLine(`高度范围 ${i + 1}`)
       for (const key of altitudeKeys) addLine(`${fieldNames[key]}：${propertyText({ properties: volume }, key)}`)
