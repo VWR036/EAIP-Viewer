@@ -9,7 +9,7 @@
       <button :class="{ on: store.tab === 'docs' }" @click="store.tab = 'docs'">
         <span class="lbl">EAIP 资料</span>
       </button>
-      <button :class="{ on: store.tab === 'airac' }" @click="store.tab = 'airac'" title="AIRAC 数据"><span class="lbl">AIRAC 数据</span></button>
+      <button :class="{ on: store.tab === 'airac' }" @click="store.tab = 'airac'; airacUI.view = 'map'" title="AIRAC 数据"><span class="lbl">AIRAC 数据</span></button>
       <div class="spring"/>
       <button @click="goHome">
         <span class="lbl">回到主页</span>
@@ -37,7 +37,7 @@
         <span class="ver" v-else>{{ store.meta.DataVersion }} · EFF {{ store.meta.EffectiveDate }}</span>
         <div class="vtitle">{{ store.tab === 'airac' ? 'AIRAC 数据' : store.viewer?.title }}</div>
         <RadioGroup v-if="store.tab === 'airac'" v-model:value="airacUI.view" size="small" aria-label="AIRAC 视图">
-          <RadioButton value="data">数据浏览</RadioButton><RadioButton value="map">地图</RadioButton>
+          <RadioButton value="map">地图</RadioButton><RadioButton value="data">数据浏览</RadioButton>
         </RadioGroup>
       </header>
       <AiracDetail v-if="store.tab === 'airac'" v-show="airacUI.view === 'data'"/>

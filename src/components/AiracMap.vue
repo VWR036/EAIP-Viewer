@@ -11,7 +11,6 @@
         <Checkbox v-for="type in mapTypes" :key="type" v-model:checked="enabled[type]">
           <span class="airac-map-key" :style="{ background: colors[type] }" />{{ typeNames[type] }}
         </Checkbox>
-        <Button @click="showDiagnostics = !showDiagnostics">地图诊断</Button>
       </div>
       <div v-if="enabled.Route && data" class="airac-map-tools">
         <span>航段导航要求：</span>
@@ -27,7 +26,7 @@
       <Alert v-if="mapError" type="error" show-icon :message="mapError" />
       <div class="airac-map-content">
         <div ref="container" class="airac-map-canvas" aria-label="AIRAC 地图" />
-        <aside v-if="query.trim() || selected || showDiagnostics || !hasFeatures" class="airac-map-inspector">
+        <aside v-if="query.trim() || showSelectionDetails || !hasFeatures" class="airac-map-inspector">
           <template v-if="query.trim()">
             <h2>搜索结果（{{ matches.total }}）</h2>
             <Empty v-if="!matches.total" description="无匹配地图对象" />
@@ -37,10 +36,10 @@
             </Button>
             <p v-if="matches.total > matches.results.length" class="airac-hint">仅显示前 {{ matches.results.length }} 项，另有 {{ matches.total - matches.results.length }} 项；请缩小搜索范围。</p>
           </template>
-          <Empty v-if="!hasFeatures" description="没有可绘制的有效要素，请查看地图诊断" />
-          <template v-if="selected">
-            <h2>{{ label(selected) }}</h2>
-            <p class="airac-hint">{{ typeNames[selected.type] }} · {{ selected.id }}</p>
+          <Empty v-if="!hasFeatures" description="没有可绘制的有效要素" />
+          <template v-if="showSelectionDetails">
+            <h2>{{ selectionTitle }}</h2>
+            <p v-if="!['RouteSegment', 'Airspace'].includes(selected.type)" class="airac-hint">{{ typeNames[selected.type] }} · {{ selected.id }}</p>
             <Alert v-if="selectionReason" type="warning" :message="`不可定位：${selectionReason}`" />
             <p v-for="key in summaryKeys" :key="key">{{ fieldNames[key] || key }}：{{ propertyText(selected, key) }}</p>
             <template v-if="selected.type === 'Airspace'">
@@ -73,30 +72,17 @@
               </p>
             </template>
             <p v-if="selected.type === 'Route'">可绘制航段：{{ featureSet(selected.id).length }}（高亮实际航段集合）</p>
-            <template v-if="selected.type === 'Navaid'">
-              <p class="airac-hint">位置代表 Navaid 整体；设备参数和独立位置以设备原始数据为准。</p>
-              <h3>关联设备（{{ data.equipment.get(selected.id).length }}）</h3>
-              <Button v-for="id in data.equipment.get(selected.id)" :key="id" type="link" @click="detail(id)">{{ typeNames[airac.objects[id].type] }} · {{ label(airac.objects[id]) }} · 查看设备详情</Button>
-            </template>
             <Button type="primary" @click="detail(selected.id)">查看数据详情</Button>
           </template>
-          <template v-if="candidates.length > 1">
+          <template v-if="showSelectionDetails && candidates.length > 1">
             <h3>点击位置的其他对象（{{ candidates.length }}）</h3>
             <Button v-for="id in candidates" :key="id" class="airac-map-result" @click="choose(id, clickLocation)">
               {{ typeNames[airac.objects[id].type] }} · {{ data.features.get(id).properties.label }}<small>{{ id }}</small>
             </Button>
           </template>
-          <template v-if="showDiagnostics">
-            <h2>地图诊断</h2>
-            <p v-for="(count,type) in data.diagnostics.counts" :key="type">{{ typeNames[type] }}：绘制 {{ count.drawn }} · 缺失 {{ count.missing }} · 无效 {{ count.invalid }}<template v-if="type === 'RouteSegment'"> · 不可绘制 {{ count.excluded }}</template></p>
-            <details v-for="[title,entries] in diagnosticGroups" :key="title">
-              <summary>{{ title }}（{{ entries.length }}）</summary>
-              <p v-for="(entry,i) in entries" :key="i"><Button type="link" @click="detail(entry.id)">{{ typeNames[entry.type] }} · {{ entry.id }}</Button><br>{{ entry.reason }}</p>
-            </details>
-          </template>
         </aside>
       </div>
-      <p class="airac-map-note">航路线表示端点关系，箭头表示 XML 声明的可用方向（单向 / 双向），不代表实际飞行轨迹。航段过短时隐藏箭头，放大后显示。空域按 XML 水平边界绘制，高度与参考面见对象详情；未支持的曲线见地图诊断。RNAV / RNP 要求随航段标注显示。标签随放大显示；视野内最多显示 80 个标签。</p>
+      <p class="airac-map-note">航路线表示端点关系，箭头表示 XML 声明的可用方向（单向 / 双向），不代表实际飞行轨迹。航段过短时隐藏箭头，放大后显示。空域按 XML 水平边界绘制，高度与参考面见对象详情。RNAV / RNP 要求随航段标注显示。标签随放大显示；视野内最多显示 80 个标签。</p>
     </template>
   </section>
 </template>
@@ -112,7 +98,7 @@ import { buildMapData, searchMap, mapTypes, propertyText, airspaceTypes, airspac
 const props = defineProps({ visible: Boolean, theme: String })
 const emit = defineEmits(['detail'])
 const container = ref(null), data = shallowRef(null)
-const query = ref(''), selectedId = ref(''), candidates = ref([]), showDiagnostics = ref(false)
+const query = ref(''), selectedId = ref(''), candidates = ref([])
 const navigationFilter = ref('ALL')
 const navigationOptions = computed(() => data.value ? [
   { value: 'ALL', label: '全部航段' }, { value: 'RNAV', label: '全部 RNAV' }, { value: 'RNP', label: '全部 RNP' },
@@ -133,7 +119,13 @@ const colors = computed(() => props.theme === 'dark'
   : { AirportHeliport: '#986014', DesignatedPoint: '#166598', Navaid: '#087962', Route: '#526797', Airspace: '#087962' })
 const matches = computed(() => data.value ? searchMap(data.value, query.value) : { results: [], total: 0 })
 const selected = computed(() => airac.objects[selectedId.value])
+const showSelectionDetails = computed(() => selected.value && !['AirportHeliport', 'DesignatedPoint', 'Navaid'].includes(selected.value.type))
 const selectedFeature = computed(() => data.value?.features.get(selectedId.value))
+const selectionTitle = computed(() => {
+  if (selected.value?.type === 'RouteSegment' && selectedFeature.value) return `航路：${label(airac.objects[selectedFeature.value.properties.routeId])}`
+  if (selected.value?.type === 'Route') return `航路：${label(selected.value)}`
+  return selected.value ? label(selected.value) : ''
+})
 const selectedServices = computed(() => selected.value?.type === 'Airspace' ? data.value.airspaceServices.get(selectedId.value) : [])
 const selectionReason = computed(() => {
   if (selected.value?.type === 'RouteSegment' && selectedFeature.value && !matchesNavigation(selectedFeature.value)) return '此航段不符合当前导航要求筛选条件'
@@ -149,13 +141,7 @@ const summaryKeys = computed(() => ({
   Airspace: ['designator', 'name', 'type'],
   RouteSegment: ['length', 'magneticTrack', 'reverseMagneticTrack'],
 }[selected.value?.type] || []))
-const diagnosticGroups = computed(() => [
-  ['合法缺失位置', data.value.diagnostics.missing],
-  ['无效位置 / 关系错误', data.value.diagnostics.invalid],
-  ['不可绘制航段', data.value.diagnostics.segments],
-  ['未绘制方向箭头', data.value.diagnostics.directions],
-])
-let map, tiles, renderer, highlight, routeArrows, observer, mounted = false, clickLocation
+let map, tiles, renderer, highlight, routeArrows, observer, selectionPopup, mounted = false, clickLocation
 const groups = new Map(), pointLayers = new Map(), spaceLayers = new Map(), navigationLayers = new Map(), routeLayers = new Map()
 const layerType = type => type === 'RouteSegment' ? 'Route' : type
 const matchesNavigation = feature => matchesRouteNavigation(feature, navigationFilter.value)
@@ -234,10 +220,10 @@ function choose(id, location) {
   if (!features.length) { map?.closePopup(); return }
   const content = document.createElement('div')
   const title = document.createElement('strong')
-  title.textContent = label(object)
+  title.textContent = selectionTitle.value
   content.append(title)
   const addLine = text => { const p = document.createElement('p'); p.textContent = text; content.append(p) }
-  addLine(`${typeNames[object.type]} · ${id}`)
+  if (showSelectionDetails.value && !['RouteSegment', 'Airspace'].includes(object.type)) addLine(`${typeNames[object.type]} · ${id}`)
   const keys = { AirportHeliport: ['locationIndicatorICAO', 'designatorIATA', 'fieldElevation'], DesignatedPoint: ['designator', 'type'], Navaid: ['designator', 'type'], RouteSegment: ['length', 'magneticTrack', 'reverseMagneticTrack'] }[object.type] || []
   for (const key of keys) addLine(`${fieldNames[key] || key}：${propertyText(object, key)}`)
   if (object.type === 'Navaid') {
@@ -257,18 +243,26 @@ function choose(id, location) {
     addLine(`可用方向：${directionText(features[0])}`)
     addLine(`导航类型：${propertyText(object, 'navigationType')}`)
     addLine(`所需导航性能：${propertyText(object, 'requiredNavigationPerformance')}`)
-    addLine(`航路：${label(airac.objects[p.routeId])}`)
     addLine(`起点：${label(airac.objects[p.startId])}；终点：${label(airac.objects[p.endId])}`)
     addLine(`已高亮所属航路的 ${featureSet(p.routeId).length} 个符合筛选的航段。`)
   }
   if (object.type === 'Route') addLine(`高亮 ${features.length} 个实际航段`)
-  if (candidates.value.length > 1) addLine(`此位置命中 ${candidates.value.length} 个对象，可在右侧选择其他对象。`)
+  if (showSelectionDetails.value && candidates.value.length > 1) addLine(`此位置命中 ${candidates.value.length} 个对象，可在右侧选择其他对象。`)
   const button = document.createElement('button')
   button.className = 'tb'; button.textContent = '查看数据详情'
   button.addEventListener('click', () => detail(id))
   content.append(button)
   const anchor = location || (features[0].geometry.type === 'Point' ? latlng(features[0].geometry.coordinates) : L.geoJSON(features).getBounds().getCenter())
-  L.popup({ maxWidth: 330 }).setLatLng(anchor).setContent(content).openOn(map)
+  const popup = L.popup({ maxWidth: 330 }).setLatLng(anchor).setContent(content)
+  popup.on('remove', () => {
+    if (selectionPopup !== popup || selectedId.value !== id || !['Route', 'RouteSegment', 'Airspace'].includes(object.type)) return
+    selectionPopup = null
+    selectedId.value = ''; candidates.value = []; clickLocation = null
+    highlightSelection()
+    updateLabels()
+  })
+  selectionPopup = popup
+  popup.openOn(map)
 }
 function locate(id) {
   candidates.value = []; clickLocation = null
