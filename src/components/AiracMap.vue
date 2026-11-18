@@ -7,11 +7,14 @@
     <Empty v-else-if="airac.status === 'idle'" description="尚未加载 AIRAC 数据" />
     <template v-else>
       <div class="airac-map-tools">
-        <Input v-model:value="query" allow-clear placeholder="地图搜索 — 机场 / 指定点 / 导航设施 / 航路" aria-label="地图搜索" />
+        <Input v-model:value="query" allow-clear placeholder="地图搜索 — 机场 / 指定点 / 导航设施 / 航路 / 空域及扇区" aria-label="地图搜索" />
         <Checkbox v-for="type in mapTypes" :key="type" v-model:checked="enabled[type]">
           <span class="airac-map-key" :style="{ background: colors[type] }" />{{ typeNames[type] }}
         </Checkbox>
         <Button @click="showDiagnostics = !showDiagnostics">地图诊断</Button>
+      </div>
+      <div v-if="enabled.Airspace && data" class="airac-map-tools">
+        <Checkbox v-for="(name,type) in airspaceTypes" :key="type" v-model:checked="spaceEnabled[type]">{{ name }}（{{ data.collections.Airspace.features.filter(f => f.properties.airspaceType === type).length }}）</Checkbox>
       </div>
       <Alert v-if="tileError" type="warning" show-icon message="底图瓦片加载失败；AIRAC 覆盖层仍可使用。" :description="`无法加载 ${tileHost} 的部分瓦片，请检查网络或配置可访问的底图服务。`">
         <template #action><Button size="small" @click="retryTiles">重试底图</Button></template>
@@ -35,6 +38,12 @@
             <p class="airac-hint">{{ typeNames[selected.type] }} · {{ selected.id }}</p>
             <Alert v-if="selectionReason" type="warning" :message="`不可定位：${selectionReason}`" />
             <p v-for="key in summaryKeys" :key="key">{{ fieldNames[key] || key }}：{{ propertyText(selected, key) }}</p>
+            <template v-if="selected.type === 'Airspace'">
+              <div v-for="(volume,i) in airspaceVolumes(selected)" :key="i">
+                <h3>空域高度范围{{ airspaceVolumes(selected).length > 1 ? `（${i + 1}）` : '' }}</h3>
+                <p v-for="key in altitudeKeys" :key="key">{{ fieldNames[key] }}：{{ propertyText({ properties: volume }, key) }}</p>
+              </div>
+            </template>
             <template v-if="selected.type === 'RouteSegment' && selectedFeature">
               <p>所属航路：<Button type="link" @click="locate(selectedFeature.properties.routeId)">{{ label(airac.objects[selectedFeature.properties.routeId]) }}</Button></p>
               <p class="airac-hint">已高亮所属航路的全部 {{ data.routes.get(selectedFeature.properties.routeId).length }} 个可绘制航段。</p>
@@ -66,7 +75,7 @@
           </template>
         </aside>
       </div>
-      <p class="airac-map-note">航路线仅表示端点关系，不代表实际飞行轨迹或可飞方向。点名随放大显示；视野内最多显示 80 个标签。</p>
+      <p class="airac-map-note">航路线仅表示端点关系，不代表实际飞行轨迹或可飞方向。空域按 XML 水平边界绘制，高度与参考面见对象详情；未支持的曲线见地图诊断。标签随放大显示；视野内最多显示 80 个标签。</p>
     </template>
   </section>
 </template>
@@ -77,21 +86,23 @@ import { Alert, Button, Checkbox, Empty, Input, Result, Spin } from 'ant-design-
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { airac, label, typeNames, fieldNames, openObject, loadAirac } from '../airac.js'
-import { buildMapData, searchMap, mapTypes, propertyText } from '../airac-map.js'
+import { buildMapData, searchMap, mapTypes, propertyText, airspaceTypes, airspaceType, airspaceVolumes, containsAirspace } from '../airac-map.js'
 
 const props = defineProps({ visible: Boolean, theme: String })
 const emit = defineEmits(['detail'])
 const container = ref(null), data = shallowRef(null)
 const query = ref(''), selectedId = ref(''), candidates = ref([]), showDiagnostics = ref(false)
 const enabled = reactive(Object.fromEntries(mapTypes.map(type => [type, true])))
+const spaceEnabled = reactive(Object.fromEntries(Object.keys(airspaceTypes).map(type => [type, true])))
+const altitudeKeys = ['lowerLimit', 'lowerLimitReference', 'upperLimit', 'upperLimitReference']
 const tileError = ref(false), mapError = ref('')
 const tileUrl = import.meta.env.VITE_AIRAC_TILE_URL
 const tileAttribution = import.meta.env.VITE_AIRAC_TILE_ATTRIBUTION
 const tileHost = ref('tile.openstreetmap.org')
 const failedTiles = new Set()
 const colors = computed(() => props.theme === 'dark'
-  ? { AirportHeliport: '#d89139', DesignatedPoint: '#4a96c9', Navaid: '#279f86', Route: '#596ca4' }
-  : { AirportHeliport: '#986014', DesignatedPoint: '#166598', Navaid: '#087962', Route: '#526797' })
+  ? { AirportHeliport: '#d89139', DesignatedPoint: '#4a96c9', Navaid: '#279f86', Route: '#596ca4', Airspace: '#279f86' }
+  : { AirportHeliport: '#986014', DesignatedPoint: '#166598', Navaid: '#087962', Route: '#526797', Airspace: '#087962' })
 const matches = computed(() => data.value ? searchMap(data.value, query.value) : { results: [], total: 0 })
 const selected = computed(() => airac.objects[selectedId.value])
 const selectedFeature = computed(() => data.value?.features.get(selectedId.value))
@@ -102,6 +113,7 @@ const summaryKeys = computed(() => ({
   DesignatedPoint: ['designator', 'name', 'type'],
   Navaid: ['designator', 'name', 'type'],
   Route: ['designatorPrefix', 'designatorSecondLetter', 'designatorNumber', 'name'],
+  Airspace: ['designator', 'name', 'type'],
   RouteSegment: ['length', 'magneticTrack', 'reverseMagneticTrack'],
 }[selected.value?.type] || []))
 const diagnosticGroups = computed(() => [
@@ -110,8 +122,9 @@ const diagnosticGroups = computed(() => [
   ['不可绘制航段', data.value.diagnostics.segments],
 ])
 let map, tiles, renderer, highlight, observer, mounted = false, clickLocation
-const groups = new Map(), pointLayers = new Map()
+const groups = new Map(), pointLayers = new Map(), spaceLayers = new Map()
 const layerType = type => type === 'RouteSegment' ? 'Route' : type
+const isEnabled = feature => enabled[layerType(feature.properties.type)] && (feature.properties.type !== 'Airspace' || spaceEnabled[feature.properties.airspaceType])
 const latlng = coordinates => L.latLng(coordinates[1], coordinates[0])
 const textNode = text => { const node = document.createElement('span'); node.textContent = text; return node }
 
@@ -123,6 +136,7 @@ function highlightSelection() {
   if (!map) return
   highlight.clearLayers()
   if (!selected.value) return
+  if (!enabled[layerType(selected.value.type)] || (selectedFeature.value && !isEnabled(selectedFeature.value))) return
   const features = selected.value.type === 'RouteSegment'
     ? data.value.routes.get(data.value.features.get(selectedId.value)?.properties.routeId) || []
     : featureSet(selectedId.value)
@@ -146,6 +160,13 @@ function choose(id, location) {
   addLine(`${typeNames[object.type]} · ${id}`)
   const keys = { AirportHeliport: ['locationIndicatorICAO', 'designatorIATA', 'fieldElevation'], DesignatedPoint: ['designator', 'type'], Navaid: ['designator', 'type'], RouteSegment: ['length', 'magneticTrack', 'reverseMagneticTrack'] }[object.type] || []
   for (const key of keys) addLine(`${fieldNames[key] || key}：${propertyText(object, key)}`)
+  if (object.type === 'Airspace') {
+    addLine(`类型：${object.fields.type}`)
+    for (const [i, volume] of airspaceVolumes(object).entries()) {
+      addLine(`高度范围 ${i + 1}`)
+      for (const key of altitudeKeys) addLine(`${fieldNames[key]}：${propertyText({ properties: volume }, key)}`)
+    }
+  }
   if (object.type === 'RouteSegment') {
     const p = features[0].properties
     addLine(`航路：${label(airac.objects[p.routeId])}`)
@@ -153,7 +174,7 @@ function choose(id, location) {
     addLine(`已高亮所属航路的 ${data.value.routes.get(p.routeId).length} 个可绘制航段。`)
   }
   if (object.type === 'Route') addLine(`高亮 ${features.length} 个实际航段`)
-  if (candidates.value.length > 1) addLine(`此位置命中 ${candidates.value.length} 个对象，可在右侧选择其他航段 / 航路。`)
+  if (candidates.value.length > 1) addLine(`此位置命中 ${candidates.value.length} 个对象，可在右侧选择其他对象。`)
   const button = document.createElement('button')
   button.className = 'tb'; button.textContent = '查看数据详情'
   button.addEventListener('click', () => detail(id))
@@ -164,6 +185,7 @@ function choose(id, location) {
 function locate(id) {
   candidates.value = []; clickLocation = null
   enabled[layerType(airac.objects[id].type)] = true
+  if (airac.objects[id].type === 'Airspace') spaceEnabled[airspaceType(airac.objects[id])] = true
   syncLayers()
   const features = featureSet(id)
   if (features.length) {
@@ -175,15 +197,20 @@ function locate(id) {
 function onClick(event) {
   const location = event.latlng, p = map.latLngToLayerPoint(location), hits = []
   for (const feature of data.value.features.values()) {
-    if (!enabled[layerType(feature.properties.type)]) continue
+    if (!isEnabled(feature)) continue
     const coordinates = feature.geometry.coordinates
     if (feature.geometry.type === 'Point') {
       if (p.distanceTo(map.latLngToLayerPoint(latlng(coordinates))) <= 9) hits.unshift(feature.properties.id)
+    } else if (['Polygon', 'MultiPolygon'].includes(feature.geometry.type)) {
+      const polygons = feature.geometry.type === 'Polygon' ? [coordinates] : coordinates
+      const nearBoundary = polygons.some(rings => rings.some(ring => ring.some((c, i) => i > 0 && L.LineUtil.pointToSegmentDistance(p, map.latLngToLayerPoint(latlng(ring[i - 1])), map.latLngToLayerPoint(latlng(c))) <= 8)))
+      if (nearBoundary || containsAirspace(feature.geometry, [location.lng, location.lat])) hits.push(feature.properties.id)
     } else {
       const a = map.latLngToLayerPoint(latlng(coordinates[0])), b = map.latLngToLayerPoint(latlng(coordinates[1]))
       if (L.LineUtil.pointToSegmentDistance(p, a, b) <= 8) hits.push(feature.properties.id)
     }
   }
+  hits.sort((a, b) => (airac.objects[a].type === 'Airspace') - (airac.objects[b].type === 'Airspace'))
   candidates.value = hits; clickLocation = location
   if (hits.length) choose(hits[0], location)
 }
@@ -196,19 +223,24 @@ function updateLabels() {
     if (enabled[type] && zoom >= (type === 'AirportHeliport' ? 7 : 10) && bounds.contains(layer.getLatLng()) && count < 80) { layer.openTooltip(); count++ }
     else layer.closeTooltip()
   }
+  for (const [id, layer] of spaceLayers) {
+    const feature = data.value.features.get(id)
+    if (isEnabled(feature) && zoom >= (feature.properties.airspaceType === 'FIR' ? 5 : 8) && bounds.contains(layer.getBounds().getCenter()) && count < 80) { layer.openTooltip(); count++ }
+    else layer.closeTooltip()
+  }
 }
 function syncLayers() {
   if (!map) return
   for (const [type, group] of groups) {
-    if (enabled[type]) group.addTo(map)
+    if (Object.hasOwn(airspaceTypes, type) ? enabled.Airspace && spaceEnabled[type] : enabled[type]) group.addTo(map)
     else map.removeLayer(group)
   }
-  if (selected.value && !enabled[layerType(selected.value.type)]) { highlight.clearLayers(); map.closePopup() }
+  if (selected.value && (!enabled[layerType(selected.value.type)] || (selectedFeature.value && !isEnabled(selectedFeature.value)))) { highlight.clearLayers(); map.closePopup() }
   else highlightSelection()
   updateLabels()
 }
 function restyle() {
-  for (const [type, group] of groups) group.setStyle({ color: colors.value[type], fillColor: colors.value[type] })
+  for (const [type, group] of groups) group.setStyle({ color: colors.value[Object.hasOwn(airspaceTypes, type) ? 'Airspace' : type], fillColor: colors.value[Object.hasOwn(airspaceTypes, type) ? 'Airspace' : type] })
   highlightSelection()
 }
 function updateTileError(event) {
@@ -231,6 +263,19 @@ async function initialize() {
     tiles = L.tileLayer(tileUrl || 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19, attribution: tileAttribution || '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a>',
     }).on('tileerror tileload tileunload', updateTileError).addTo(map)
+    for (const [type, name] of Object.entries(airspaceTypes)) {
+      const features = data.value.collections.Airspace.features.filter(f => f.properties.airspaceType === type)
+      const group = L.geoJSON(features, {
+        renderer, interactive: false,
+        style: { color: colors.value.Airspace, weight: type === 'FIR' ? 2.5 : 1.5, opacity: 0.65, fillOpacity: 0.025, dashArray: ['AR', 'AP', 'SECTOR'].includes(type) ? '5 4' : null },
+        onEachFeature: (feature, layer) => {
+          layer.bindTooltip(textNode(`${airac.objects[feature.properties.id].fields.designator} · ${name}`), { direction: 'center' })
+          spaceLayers.set(feature.properties.id, layer)
+        },
+      })
+      groups.set(type, group)
+      if (enabled.Airspace && spaceEnabled[type]) group.addTo(map)
+    }
     for (const type of ['Route', ...mapTypes.slice(0, 3)]) {
       const collection = data.value.collections[type === 'Route' ? 'RouteSegment' : type]
       const group = L.geoJSON(collection, {
@@ -242,7 +287,7 @@ async function initialize() {
         },
       })
       groups.set(type, group)
-      if (enabled[type]) group.addTo(map)
+      if (Object.hasOwn(airspaceTypes, type) ? enabled.Airspace && spaceEnabled[type] : enabled[type]) group.addTo(map)
     }
     highlight = L.layerGroup().addTo(map)
     const bounds = L.featureGroup([...groups.values()]).getBounds()
@@ -254,7 +299,7 @@ async function initialize() {
   } catch (error) {
     mapError.value = `地图初始化失败：${error.message}`
     observer?.disconnect(); map?.remove(); map = null
-    groups.clear(); pointLayers.clear()
+    groups.clear(); pointLayers.clear(); spaceLayers.clear()
   }
 }
 watch(() => airac.status, initialize)
@@ -264,11 +309,12 @@ watch(() => props.visible, async visible => {
   map?.invalidateSize({ pan: false }); updateLabels()
 })
 watch(enabled, syncLayers)
+watch(spaceEnabled, syncLayers)
 watch(colors, restyle)
 onMounted(() => { mounted = true; initialize() })
 onBeforeUnmount(() => {
   mounted = false; observer?.disconnect(); map?.remove()
   failedTiles.clear()
-  groups.clear(); pointLayers.clear(); map = null
+  groups.clear(); pointLayers.clear(); spaceLayers.clear(); map = null
 })
 </script>

@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import { buildMapData, position, searchMap } from '../src/airac-map.js'
+import { buildMapData, position, searchMap, airspaceGeometry, containsAirspace, airspaceVolumes, propertyText } from '../src/airac-map.js'
 
 const A = 'http://www.aixm.aero/schema/5.1.1', G = 'http://www.opengis.net/gml/3.2'
 const NIL = '{http://www.w3.org/2001/XMLSchema-instance}nil'
@@ -125,11 +125,28 @@ test('local snapshot geometry and every effective segment match their real endpo
   const objects = JSON.parse(fs.readFileSync(new URL(manifest.objectsFile, base)))
   const relations = JSON.parse(fs.readFileSync(new URL(manifest.relationsFile, base)))
   const data = buildMapData(objects, relations)
-  assert.equal(data.diagnostics.invalid.length, 0)
+  assert.equal(data.diagnostics.invalid.filter(d => d.type !== 'Airspace').length, 0)
   assert.equal(data.diagnostics.segments.length, 0)
   for (const type of ['AirportHeliport','DesignatedPoint']) assert.equal(data.collections[type].features.length, manifest.counts[type])
   assert.equal(data.collections.Navaid.features.length + data.diagnostics.counts.Navaid.missing, manifest.counts.Navaid)
   assert.equal(data.collections.RouteSegment.features.length, manifest.counts.RouteSegment)
+  const spaces = data.diagnostics.counts.Airspace
+  assert.equal(spaces.drawn + spaces.missing + spaces.invalid, manifest.counts.Airspace)
+  for (const prefix of ['ZSSSAR', 'ZSSSAP']) {
+    const sectors = Object.values(objects).filter(o => o.type === 'Airspace' && new RegExp(`^${prefix}\\d+[A-Z]*$`).test(o.fields.designator))
+    assert.equal(sectors.length, prefix === 'ZSSSAR' ? 44 : 17)
+    for (const sector of sectors) assert.equal(data.features.has(sector.id), true, sector.fields.designator)
+  }
+  for (const code of ['ZSHA', 'ZSSSCTA', 'ZSSSAPP', 'ZSSSLTA', 'ZSSSAR33']) {
+    const entry = searchMap(data, code).results.find(e => e.code === code)
+    assert.ok(entry, code)
+    assert.equal(entry.reason, '')
+    assert.equal(data.features.get(entry.id).geometry.type, 'Polygon')
+  }
+  const ar33 = Object.values(objects).find(o => o.fields.designator === 'ZSSSAR33')
+  const volume = airspaceVolumes(ar33)[0]
+  assert.equal(propertyText({ properties: volume }, 'lowerLimit'), 'GND')
+  assert.equal(propertyText({ properties: volume }, 'upperLimit'), '12500 M')
   for (const f of data.collections.RouteSegment.features) {
     for (const [index,role] of ['start','end'].entries()) {
       const r = relations.references.find(r => r.active && r.sourceId === f.properties.id && r.role === role && ['pointChoice_fixDesignatedPoint','pointChoice_navaidSystem'].includes(r.field))
@@ -138,4 +155,50 @@ test('local snapshot geometry and every effective segment match their real endpo
     }
   }
   console.log('Snapshot', manifest.generation, JSON.stringify(data.diagnostics.counts), 'routes with geometry', [...data.routes.values()].filter(v=>v.length).length)
+})
+
+function spaceObject() {
+  const list = node('posList', [], '20 100 20 102 22 102 22 100 20 100', {}, G)
+  const curve = node('Curve', [node('segments', [node('GeodesicString', [list], '', {}, G)], '', {}, G)])
+  const ring = node('Ring', [node('curveMember', [curve], '', {}, G)], '', {}, G)
+  const patch = node('PolygonPatch', [node('exterior', [ring], '', {}, G)], '', {}, G)
+  const surface = node('ElevatedSurface', [node('patches', [patch], '', {}, G)], '', { srsName: 'urn:ogc:def:crs:EPSG::4326' })
+  const volume = node('AirspaceVolume', [node('horizontalProjection', [surface])])
+  return { ...object('space', 'Airspace', undefined, { designator: 'TESTAR01', type: 'SECTOR' }), properties: node('AirspaceTimeSlice', [node('geometryComponent', [node('AirspaceGeometryComponent', [node('theAirspaceVolume', [volume])])])]) }
+}
+
+test('airspace polygons preserve axis order, containment, holes and multiple volumes', () => {
+  const space = spaceObject()
+  const geometry = airspaceGeometry(space).geometry
+  assert.deepEqual(geometry.coordinates[0][0], [100, 20])
+  assert.equal(containsAirspace(geometry, [101, 21]), true)
+  assert.equal(containsAirspace(geometry, [103, 21]), false)
+  const hole = [[100.5,20.5],[101.5,20.5],[101.5,21.5],[100.5,21.5],[100.5,20.5]]
+  assert.equal(containsAirspace({ type: 'Polygon', coordinates: [...geometry.coordinates, hole] }, [101,21]), false)
+  space.properties.children.push(structuredClone(space.properties.children[0]))
+  const multi = airspaceGeometry(space).geometry
+  assert.equal(multi.type, 'MultiPolygon')
+  assert.equal(multi.coordinates.length, 2)
+  assert.equal(containsAirspace(multi, [101,21]), true)
+  const data = buildMapData({ space }, { references: [] })
+  assert.equal(data.features.get('space').properties.airspaceType, 'AR')
+  assert.equal(searchMap(data, 'testar01').total, 1)
+})
+
+test('unsupported, malformed and unclosed airspace boundaries are diagnosed without drawing', () => {
+  for (const change of [
+    surface => { surface.attributes.srsName = 'EPSG:3857' },
+    surface => { surface.children[0].children[0].children[0].children[0].children[0].children[0].children[0].children[0].name = 'ArcByCenterPoint' },
+    surface => { surface.children[0].children[0].children[0].children[0].children[0].children[0].children[0].children[0].children[0].text = '20 100 20 102 22 102 22 100' },
+    surface => { surface.attributes.srsDimension = '3' },
+  ]) {
+    const space = spaceObject()
+    const surface = airspaceVolumes(space)[0].children[0].children[0]
+    change(surface)
+    assert.equal(airspaceGeometry(space).status, 'invalid')
+    const data = buildMapData({ space }, { references: [] })
+    assert.equal(data.features.has('space'), false)
+    assert.equal(data.diagnostics.invalid.length, 1)
+    assert.ok(searchMap(data, 'testar01').results[0].reason)
+  }
 })

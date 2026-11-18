@@ -3,13 +3,83 @@ import { label } from './airac.js'
 const A = 'http://www.aixm.aero/schema/5.1.1'
 const G = 'http://www.opengis.net/gml/3.2'
 const NIL = '{http://www.w3.org/2001/XMLSchema-instance}nil'
-export const mapTypes = ['AirportHeliport', 'DesignatedPoint', 'Navaid', 'Route']
+export const mapTypes = ['AirportHeliport', 'DesignatedPoint', 'Navaid', 'Route', 'Airspace']
+export const airspaceTypes = { FIR: '飞行情报区 FIR', CTA: '管制区 CTA', TMA: '终端管制区 TMA', AR: '区域扇区 AR', AP: '进近扇区 AP', SECTOR: '其他扇区', R: '限制区 R', D: '危险区 D', P: '禁区 P', ADIZ: 'ADIZ' }
+export function airspaceType(object) {
+  if (object.fields.type === 'SECTOR') {
+    const match = object.fields.designator?.match(/(?:AR|AP)\d+[A-Z]*$/)
+    if (match) return match[0].slice(0, 2)
+  }
+  return object.fields.type
+}
 const paths = {
   AirportHeliport: ['ARP', 'ElevatedPoint'],
   DesignatedPoint: ['location', 'Point'],
   Navaid: ['location', 'ElevatedPoint'],
 }
 const nil = node => ['true', '1'].includes(node.attributes[NIL])
+const children = (node, name, namespace = A) => node.children.filter(n => n.name === name && n.namespace === namespace)
+function one(node, name, namespace = A) {
+  const nodes = children(node, name, namespace)
+  if (nodes.length !== 1) throw new Error(`${name} 节点数量 ${nodes.length}，预期 1`)
+  if (nil(nodes[0])) throw new Error(`${name} 为 nil · ${nodes[0].attributes.nilReason}`)
+  return nodes[0]
+}
+export function airspaceVolumes(object) {
+  return children(object.properties, 'geometryComponent').map(n => one(one(one(n, 'AirspaceGeometryComponent'), 'theAirspaceVolume'), 'AirspaceVolume'))
+}
+export function airspaceGeometry(object) {
+  if (object.properties.namespace !== A || object.properties.name !== 'AirspaceTimeSlice') return { status: 'invalid', reason: '不支持的空域时间片结构' }
+  if (!children(object.properties, 'geometryComponent').length) return { status: 'missing', reason: '缺少 geometryComponent' }
+  try {
+    const polygons = airspaceVolumes(object).map(volume => {
+      const surface = one(one(volume, 'horizontalProjection'), 'ElevatedSurface')
+      if (surface.attributes.srsName !== 'urn:ogc:def:crs:EPSG::4326' || (surface.attributes.srsDimension && surface.attributes.srsDimension !== '2')) throw new Error('空域边界 CRS 或维度不支持')
+      const patch = one(one(surface, 'patches', G), 'PolygonPatch', G)
+      if (patch.children.some(n => !['exterior', 'interior'].includes(n.name) || n.namespace !== G)) throw new Error('不支持的 PolygonPatch 结构')
+      return [one(patch, 'exterior', G), ...children(patch, 'interior', G)].map(boundary => {
+        const ring = one(boundary, 'Ring', G), coordinates = []
+        if (!ring.children.length || ring.children.some(n => n.name !== 'curveMember' || n.namespace !== G)) throw new Error('不支持的空域 Ring 结构')
+        for (const member of ring.children) {
+          const segments = one(one(member, 'Curve'), 'segments', G)
+          if (!segments.children.length) throw new Error('空域边界 segments 为空')
+          for (const segment of segments.children) {
+            if (segment.name !== 'GeodesicString' || segment.namespace !== G) throw new Error(`尚不支持空域曲线 ${segment.name}，未绘制此空域`)
+            const list = one(segment, 'posList', G)
+            for (const n of [segments, segment, list]) {
+              if ((n.attributes.srsName && n.attributes.srsName !== surface.attributes.srsName) || (n.attributes.srsDimension && n.attributes.srsDimension !== '2')) throw new Error('空域坐标 CRS 或维度不一致')
+            }
+            const parts = list.text.trim().split(/\s+/)
+            if (list.children.length || parts.length < 4 || parts.length % 2 || !parts.every(v => /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(v))) throw new Error('空域 posList 格式错误')
+            const points = []
+            for (let i = 0; i < parts.length; i += 2) {
+              const lat = Number(parts[i]), lon = Number(parts[i + 1])
+              if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) throw new Error('空域坐标越界或不是有限数值')
+              points.push([lon, lat])
+            }
+            if (coordinates.length && coordinates.at(-1).some((v, i) => v !== points[0][i])) throw new Error('空域边界曲线不连续')
+            coordinates.push(...(coordinates.length ? points.slice(1) : points))
+          }
+        }
+        if (coordinates.length < 4 || coordinates[0].some((v, i) => v !== coordinates.at(-1)[i])) throw new Error('空域边界未闭合或顶点不足')
+        return coordinates
+      })
+    })
+    return { status: 'valid', geometry: polygons.length === 1 ? { type: 'Polygon', coordinates: polygons[0] } : { type: 'MultiPolygon', coordinates: polygons } }
+  } catch (error) { return { status: 'invalid', reason: error.message } }
+}
+export function containsAirspace(geometry, point) {
+  const inRing = ring => {
+    let inside = false
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const [x, y] = ring[i], [xj, yj] = ring[j]
+      if ((y > point[1]) !== (yj > point[1]) && point[0] < (xj - x) * (point[1] - y) / (yj - y) + x) inside = !inside
+    }
+    return inside
+  }
+  const polygons = geometry.type === 'Polygon' ? [geometry.coordinates] : geometry.coordinates
+  return polygons.some(rings => inRing(rings[0]) && !rings.slice(1).some(inRing))
+}
 
 // Only these semantic paths and this CRS have been confirmed in the dataset.
 export function position(object) {
@@ -50,7 +120,7 @@ export function propertyText(object, key) {
 }
 
 export function buildMapData(objects, relations) {
-  const collections = Object.fromEntries([...mapTypes.slice(0, 3), 'RouteSegment'].map(type => [type, { type: 'FeatureCollection', features: [] }]))
+  const collections = Object.fromEntries([...mapTypes.slice(0, 3), 'RouteSegment', 'Airspace'].map(type => [type, { type: 'FeatureCollection', features: [] }]))
   const positions = new Map(), features = new Map(), segments = new Map(), routes = new Map(), equipment = new Map()
   const diagnostics = { missing: [], invalid: [], segments: [], counts: {} }
   const active = Object.values(objects).filter(o => o.active === true)
@@ -58,6 +128,15 @@ export function buildMapData(objects, relations) {
     if (o.type === 'Route') routes.set(o.id, [])
     if (o.type === 'RouteSegment') segments.set(o.id, { start: [], end: [], route: [], errors: [] })
     if (o.type === 'Navaid') equipment.set(o.id, [])
+    if (o.type === 'Airspace') {
+      const result = airspaceGeometry(o)
+      if (result.status !== 'valid') diagnostics[result.status].push({ id: o.id, type: o.type, reason: result.reason })
+      else {
+        const feature = { type: 'Feature', geometry: result.geometry, properties: { id: o.id, type: o.type, airspaceType: airspaceType(o), label: label(o) } }
+        collections.Airspace.features.push(feature)
+        features.set(o.id, feature)
+      }
+    }
     if (!paths[o.type]) continue
     const result = position(o)
     positions.set(o.id, result)
@@ -113,7 +192,7 @@ export function buildMapData(objects, relations) {
     routes.get(routeId).push(feature)
   }
   for (const [id, ids] of equipment) equipment.set(id, [...new Set(ids)])
-  for (const type of [...mapTypes.slice(0, 3), 'RouteSegment']) {
+  for (const type of [...mapTypes.slice(0, 3), 'RouteSegment', 'Airspace']) {
     diagnostics.counts[type] = { drawn: collections[type].features.length, missing: diagnostics.missing.filter(d => d.type === type).length, invalid: diagnostics.invalid.filter(d => d.type === type).length, excluded: type === 'RouteSegment' ? diagnostics.segments.length : 0 }
   }
   const reasons = new Map([...diagnostics.missing, ...diagnostics.invalid, ...diagnostics.segments].map(d => [d.id, d.reason]))
