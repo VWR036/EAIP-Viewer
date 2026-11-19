@@ -11,10 +11,18 @@ export function label(o) {
 }
 export const idsOf = type => Object.values(airac.objects).filter(o => o.active && o.type === type).map(o => o.id)
 export const airportGroups = a => [['基本信息', [a.id]], ['跑道', a.runways], ['导航设施', a.navaids], ['关联指定点', a.points], ['关联航段', a.segments], ['关联航路', a.routes]]
-export function selectNode(node) { airac.selected = node; airacUI.selectedKeys = node ? [node.key] : [] }
+export function selectNode(node) {
+  if (node && !node.ancestors) {
+    const current = airac.selected
+    const isChild = current && node.breadcrumb.length === current.breadcrumb.length + 1 && current.breadcrumb.every((title, i) => title === node.breadcrumb[i])
+    node = { ...node, ancestors: isChild ? [...current.ancestors, current] : [] }
+  }
+  airac.selected = node; airacUI.selectedKeys = node ? [node.key] : []
+}
 export function openObject(id) {
   const o = airac.objects[id]
-  selectNode({ key: `public/${o.type}/${id}`, title: label(o), objectId: id, breadcrumb: ['公共总目录', typeNames[o.type], label(o)] })
+  const category = { key: `overview/${o.type}`, ids: idsOf(o.type), breadcrumb: ['数据集概览', typeNames[o.type]], ancestors: [] }
+  selectNode({ key: `public/${o.type}/${id}`, title: label(o), objectId: id, breadcrumb: [...category.breadcrumb, label(o)], ancestors: [category] })
 }
 function validate(manifest, objects, relations) {
   if (manifest.formatVersion !== 1 || !manifest.effectiveTime || manifest.validation?.status !== 'passed' || !manifest.counts || !manifest.diagnostics || !objects || Array.isArray(objects) || !Array.isArray(relations?.references) || !relations.airports) throw new Error('AIRAC 索引结构或版本不正确')

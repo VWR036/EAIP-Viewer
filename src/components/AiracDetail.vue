@@ -7,7 +7,15 @@ npm run index:airac -- --source "C:/path/to/Dataset"</pre><Button @click="loadAi
     </Result>
     <Empty v-else-if="airac.status === 'idle'" description="尚未加载 AIRAC 数据" />
     <template v-else>
-      <Breadcrumb><BreadcrumbItem v-for="(crumb,i) in crumbs" :key="i">{{ crumb.title }}</BreadcrumbItem></Breadcrumb>
+      <div class="airac-detail-navigation">
+        <Button v-if="selected" size="small" @click="selectNode(selected.ancestors.at(-1) || null)">返回上级菜单</Button>
+        <Breadcrumb>
+          <BreadcrumbItem v-for="(crumb,i) in crumbs" :key="i">
+            <Button v-if="i < crumbs.length - 1" type="link" @click="selectNode(crumb.node)">{{ crumb.title }}</Button>
+            <span v-else>{{ crumb.title }}</span>
+          </BreadcrumbItem>
+        </Breadcrumb>
+      </div>
       <template v-if="!selected">
         <h1>AIRAC 数据集概览</h1><p class="airac-hint">AIXM 5.1.1 · BASELINE · {{ Object.keys(airac.objects).length.toLocaleString() }} 个原始对象</p>
         <Descriptions bordered :column="{ xs: 1, md: 2 }" size="small">
@@ -63,7 +71,10 @@ const selected = computed(() => airac.selected)
 const object = computed(() => airac.objects[selected.value?.objectId])
 const airport = computed(() => airac.relations.airports[selected.value?.airportId])
 watch(() => object.value?.id, () => { tab.value = 'properties' })
-const crumbs = computed(() => (selected.value?.breadcrumb || ['AIRAC','数据集概览']).map(title => ({title})))
+const crumbs = computed(() => [
+  { title: '数据集概览', node: null },
+  ...(selected.value ? [...selected.value.ancestors, selected.value].map(node => ({ title: node.breadcrumb.at(-1), node })) : [])
+])
 const rows = computed(() => (selected.value?.ids || []).map(id => airac.objects[id]))
 const listColumns = [{title:'对象',key:'name'},{title:'类型',key:'type'},{title:'关联依据',key:'evidence'}]
 const relationColumns = [{title:'含义',dataIndex:'meaning'},{title:'关联对象',key:'target'},{title:'原始字段路径',dataIndex:'path'}]

@@ -44,5 +44,15 @@ const nodes = computed(() => airac.status !== 'ready' ? [] : [
   ] }
 ])
 const otherTypes = ['Navaid','VOR','DME','NDB','Localizer','Glidepath','MarkerBeacon','AirTrafficControlService','RadioCommunicationChannel','Unit']
-function onSelect(keys, info) { if (keys.length) selectNode(info.node.dataRef) }
+function onSelect(keys, info) {
+  if (!keys.length) return
+  function findAncestors(items, ancestors = []) {
+    for (const node of items) {
+      if (node.key === info.node.dataRef.key) return ancestors
+      const found = findAncestors(node.children || [], [...ancestors, { ...node, ancestors }])
+      if (found) return found
+    }
+  }
+  selectNode({ ...info.node.dataRef, ancestors: findAncestors(nodes.value) })
+}
 </script>

@@ -310,6 +310,8 @@ body {
 .airac-tree .ant-tree { background:transparent; }
 .airac-tree .ant-tree-title { overflow-wrap:anywhere; }
 .airac-detail { flex:1; overflow:auto; padding:24px; min-height:0; }
+.airac-detail-navigation { display:flex; align-items:center; flex-wrap:wrap; gap:8px 16px; }
+.airac-detail-navigation .ant-btn-link { padding:0; }
 .airac-detail h1 { font-size:23px; margin:18px 0 8px; }
 .airac-detail h2 { font-size:16px; margin:24px 0 12px; }
 .airac-detail p { margin:12px 0; overflow-wrap:anywhere; }
