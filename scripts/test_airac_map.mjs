@@ -143,6 +143,47 @@ test('local snapshot geometry and every effective segment match their real endpo
   }
   const spaces = data.diagnostics.counts.Airspace
   assert.equal(spaces.drawn + spaces.missing + spaces.invalid, manifest.counts.Airspace)
+  const hasCircle = n => (n.namespace === G && n.name === 'CircleByCenterPoint') || n.children.some(hasCircle)
+  const circleSpaces = Object.values(objects).filter(o => o.type === 'Airspace' && hasCircle(o.properties))
+  assert.equal(circleSpaces.length, 10)
+  for (const space of circleSpaces) {
+    const feature = data.features.get(space.id)
+    assert.ok(feature, space.fields.designator || space.name)
+    const ring = feature.geometry.coordinates[0]
+    assert.deepEqual(ring[0], ring.at(-1))
+    assert.ok(ring.length > 100)
+  }
+  const annotatedCodes = ['ZGNNAR09','ZGNNAR08','ZLXNAP01','ZLXNAP02','ZLXNAP03','ZLXNAP04','ZHHHAP03','ZHHHAP05']
+  assert.equal(data.diagnostics.approximations.filter(r=>!r.reason.startsWith('边界不完整')).length, 12)
+  for (const code of annotatedCodes) {
+    const space = Object.values(objects).find(o => o.type === 'Airspace' && o.fields.designator === code)
+    const feature = data.features.get(space.id)
+    assert.ok(feature, code)
+    const ring = feature.geometry.coordinates[0]
+    assert.deepEqual(ring[0], ring.at(-1))
+    assert.equal(feature.properties.geometryWarnings.length, 1)
+    assert.match(feature.properties.geometryWarnings[0], /近似连接保留 XML 端点/)
+    const lists = []
+    const visit = n => { if (n.namespace === G && n.name === 'posList') lists.push(n); n.children.forEach(visit) }
+    visit(space.properties)
+    for (const list of lists) {
+      const parts = list.text.trim().split(/\s+/).map(Number)
+      for (let i = 0; i < parts.length; i += 2) assert.ok(ring.some(p => p[0] === parts[i + 1] && p[1] === parts[i]), `${code} preserves XML vertex`)
+    }
+  }
+  for (const code of ['ZBAACTA','ZGJDTMA','ZPJHAPP']) {
+    const space = Object.values(objects).find(o => o.type === 'Airspace' && o.fields.designator === code)
+    assert.equal(data.features.get(space.id).properties.incompleteBoundary, true, `${code} uses straight connectors for missing boundary geometry`)
+  }
+  const xining = Object.values(objects).find(o => o.type === 'Airspace' && o.fields.designator === 'ZLXNAPP')
+  const xiningFeature = data.features.get(xining.id)
+  assert.ok(xiningFeature)
+  const xiningRing = xiningFeature.geometry.coordinates[0]
+  assert.deepEqual(xiningRing[0], xiningRing.at(-1))
+  assert.equal(xiningFeature.properties.geometryWarnings.length, 2)
+  assert.ok(xiningFeature.properties.geometryWarnings.every(w => w.includes('按 XML 顺序直线连接')))
+  assert.ok(xiningRing.some(p => p[0] === 101.8336111111 && p[1] === 35.7769444445))
+  assert.ok(xiningRing.some(p => p[0] === 101.5833333333 && p[1] === 37.3752777778))
   for (const prefix of ['ZSSSAR', 'ZSSSAP']) {
     const sectors = Object.values(objects).filter(o => o.type === 'Airspace' && new RegExp(`^${prefix}\\d+[A-Z]*$`).test(o.fields.designator))
     assert.equal(sectors.length, prefix === 'ZSSSAR' ? 44 : 17)
@@ -333,4 +374,179 @@ test('navigation labels distinguish RNAV from RNP and preserve explicit missing 
   assert.equal(routeNavigationLabel(segment), '')
   segment.properties.children = []
   assert.equal(routeNavigationLabel(segment), '')
+})
+
+
+function curvedSpace(kind = 'CircleByCenterPoint', center = '0 0', radius = '100', uom = 'KM', angles = []) {
+  const space = spaceObject()
+  const surface = airspaceVolumes(space)[0].children[0].children[0]
+  const segments = surface.children[0].children[0].children[0].children[0].children[0].children[0].children[0]
+  const segment = node(kind, [node('pos', [], center, {}, G), node('radius', [], radius, { uom }, G), ...angles.map((a,i) => node(i ? 'endAngle' : 'startAngle', [], String(a), { uom: 'deg' }, G))], '', { numArc: '1' }, G)
+  segments.children = [segment]
+  return { space, segment, segments }
+}
+
+test('center-point circles use WGS84 distances, unit conversion and exact closure', () => {
+  const { space } = curvedSpace()
+  const result = airspaceGeometry(space)
+  assert.equal(result.status, 'valid')
+  const ring = result.geometry.coordinates[0]
+  assert.deepEqual(ring[0], ring.at(-1))
+  assert.ok(Math.abs(ring[0][0]) < 1e-10)
+  assert.ok(Math.abs(ring[0][1] - 0.9043687229127633) < 1e-9)
+  const east = airspaceGeometry(curvedSpace('CircleByCenterPoint','0 0','111319.49079327357','M').space).geometry.coordinates[0]
+  assert.ok(east.some(([lon,lat]) => Math.abs(lon - 1) < 1e-8 && Math.abs(lat) < 1e-8))
+  const nautical = airspaceGeometry(curvedSpace('CircleByCenterPoint','0 0','10','NM').space).geometry.coordinates
+  const metres = airspaceGeometry(curvedSpace('CircleByCenterPoint','0 0','18520','M').space).geometry.coordinates
+  assert.deepEqual(nautical, metres)
+  assert.equal(containsAirspace(result.geometry,[0,0]), true)
+})
+
+test('partial arcs respect signed bearings and angles beyond 360 when joined to a straight segment', () => {
+  const north = [0,0.9043687229127633], east = [0.8983152841195214,0], west = [-0.8983152841195214,0]
+  for (const [angles,start,end] of [[[0,90],north,east],[[90,0],east,north],[[270,450],west,east]]) {
+    const { space, segments } = curvedSpace('ArcByCenterPoint','0 0','100','KM',angles)
+    segments.children.push(node('GeodesicString',[node('posList',[],`${end[1]} ${end[0]} ${start[1]} ${start[0]}`,{},G)],'',{},G))
+    const result = airspaceGeometry(space)
+    assert.equal(result.status,'valid',result.reason)
+    const ring=result.geometry.coordinates[0]
+    assert.deepEqual(ring[0],ring.at(-1))
+    assert.ok(Math.abs(ring[0][0]-start[0])<1e-8 && Math.abs(ring[0][1]-start[1])<1e-8)
+    if (angles[1] === 450) assert.ok(ring.some(([lon,lat])=>Math.abs(lon)<0.02 && lat>0.9))
+  }
+  const full = airspaceGeometry(curvedSpace('ArcByCenterPoint','0 0','100','KM',[128,488]).space)
+  assert.equal(full.status,'valid')
+  assert.equal(containsAirspace(full.geometry,[0,0]),true)
+})
+
+test('circle centers resolve effective airport and Navaid references, with explicit failures for missing data', () => {
+  for (const type of ['AirportHeliport','Navaid']) {
+    const target=object('center',type,'25 110')
+    const { space,segment }=curvedSpace()
+    segment.children[0]=node('pointProperty',[],'',{'{http://www.w3.org/1999/xlink}href':'urn:uuid:center'},G)
+    assert.equal(airspaceGeometry(space,{center:target}).status,'valid')
+    assert.match(airspaceGeometry(space,{}).reason,/圆心引用目标/)
+    target.active=false
+    assert.equal(airspaceGeometry(space,{center:target}).status,'invalid')
+    target.active=true; target.properties.children=[]
+    assert.match(airspaceGeometry(space,{center:target}).reason,/位置不可用/)
+  }
+  for (const [radius,uom] of [['-1','KM'],['NaN','KM'],['1','UNKNOWN']]) assert.equal(airspaceGeometry(curvedSpace('CircleByCenterPoint','0 0',radius,uom).space).status,'invalid')
+  assert.equal(airspaceGeometry(curvedSpace('CircleByCenterPoint','91 0').space).status,'invalid')
+  for (const angles of [[0,0],[0,361]]) assert.equal(airspaceGeometry(curvedSpace('ArcByCenterPoint','0 0','100','KM',angles).space).status,'invalid')
+})
+
+
+function annotatedSpace(text) {
+  const space = spaceObject(), surface = airspaceVolumes(space)[0].children[0].children[0]
+  const ring = surface.children[0].children[0].children[0].children[0]
+  const note = node('Note', [node('propertyName', [], 'arc'), node('translatedNote', [node('LinguisticNote', [node('note', [], text, { lang: 'eng' })])])])
+  const line = coords => node('segments', [node('GeodesicString', [node('posList', [], coords, {}, G)], '', {}, G)], '', {}, G)
+  ring.children = [
+    node('curveMember', [node('Curve', [line('0.9043687229127633 0'), node('annotation', [note])])], '', {}, G),
+    node('curveMember', [node('Curve', [line('0 0.8983152841195214 0.9043687229127633 0')])], '', {}, G),
+  ]
+  return { space, note }
+}
+
+test('English arc annotations determine clockwise and anticlockwise geometry, preserving XML joints', () => {
+  for (const direction of ['a clockwised','an anticlockwised']) {
+    const { space } = annotatedSpace(`${direction} arc with radius of 100km centered at 0 0`)
+    const result = airspaceGeometry(space)
+    assert.equal(result.status, 'valid', result.reason)
+    const ring = result.geometry.coordinates[0]
+    assert.deepEqual(ring[0], [0,0.9043687229127633])
+    assert.deepEqual(ring[0], ring.at(-1))
+    assert.ok(ring.some(p => p[0] === 0.8983152841195214 && p[1] === 0))
+    assert.equal(result.warnings.length,1)
+    assert.equal(containsAirspace(result.geometry,[0,0]), direction.startsWith('an'))
+    assert.equal(containsAirspace(result.geometry,[0.5,0.5]), !direction.startsWith('an'))
+  }
+})
+
+test('malformed, ambiguous and inconsistent arc annotations fail without inventing a boundary', () => {
+  for (const text of [
+    'an unknown arc centered somewhere',
+    'a clockwised arc with radius of 100km centered at 91 0',
+    'a clockwised arc with radius of -100km centered at 0 0',
+    'a clockwised arc with radius of 10km centered at 0 0',
+  ]) assert.equal(airspaceGeometry(annotatedSpace(text).space).status,'invalid',text)
+  const { space,note } = annotatedSpace('a clockwised arc with radius of 100km centered at 0 0')
+  const curve = airspaceVolumes(space)[0].children[0].children[0].children[0].children[0].children[0].children[0].children[0].children[0]
+  curve.children.push(node('annotation',[structuredClone(note)]))
+  assert.match(airspaceGeometry(space).reason,/圆弧备注不唯一/)
+  note.children[0].text = 'border'
+  curve.children.pop()
+  assert.equal(airspaceGeometry(space).status,'invalid')
+})
+
+
+test('structured arc gaps retain both endpoints and close the ring with explicit straight connectors', () => {
+  const { space,segments }=curvedSpace('ArcByCenterPoint','0 0','100','KM',[0,90])
+  const end=[0.8993152841195214,0], start=[0,0.9053687229127633]
+  segments.children.push(node('GeodesicString',[node('posList',[],`${end[1]} ${end[0]} ${start[1]} ${start[0]}`,{},G)],'',{},G))
+  const result=airspaceGeometry(space)
+  assert.equal(result.status,'valid',result.reason)
+  const ring=result.geometry.coordinates[0]
+  assert.deepEqual(ring[0],ring.at(-1))
+  const endpoint=ring.findIndex(p=>p[0]===end[0] && p[1]===end[1])
+  assert.ok(endpoint>0)
+  assert.ok(Math.abs(ring[endpoint-1][0]-0.8983152841195214)<1e-8)
+  assert.deepEqual(ring.at(-2),start)
+  assert.equal(result.warnings.length,2)
+  assert.ok(result.warnings.every(w=>w.includes('按 XML 顺序直线连接')))
+})
+
+
+test('external border references complete 45 airspaces and leave 17 explicitly simplified outlines', () => {
+  const base = new URL('../public/data/airac-index/', import.meta.url)
+  const manifest = JSON.parse(fs.readFileSync(new URL('manifest.json', base)))
+  const objects = JSON.parse(fs.readFileSync(new URL(manifest.objectsFile, base)))
+  const relations = JSON.parse(fs.readFileSync(new URL(manifest.relationsFile, base)))
+  const borders = JSON.parse(fs.readFileSync(new URL('../public/data/airac-boundaries.json', import.meta.url)))
+  const original = buildMapData(objects,relations)
+  const data = buildMapData(objects,relations,borders)
+  const restored = data.collections.Airspace.features.filter(f=>original.features.get(f.properties.id).properties.incompleteBoundary && !f.properties.incompleteBoundary)
+  assert.equal(restored.length,45)
+  assert.equal(data.diagnostics.counts.Airspace.drawn,734)
+  assert.equal(data.diagnostics.counts.Airspace.invalid,0)
+  assert.equal(data.diagnostics.counts.Airspace.missing,2)
+  for (const feature of restored) {
+    assert.ok(feature.properties.geometryWarnings.some(w=>w.includes('外部边界近似补全')))
+    const ring=feature.geometry.coordinates[0]
+    assert.deepEqual(ring[0],ring.at(-1))
+    const lists=[]
+    const visit=n=>{if(n.namespace===G && n.name==='posList')lists.push(n);n.children.forEach(visit)}
+    visit(objects[feature.properties.id].properties)
+    for(const list of lists){
+      const nums=list.text.trim().split(/\s+/).map(Number)
+      for(let i=0;i<nums.length;i+=2)assert.ok(ring.some(p=>p[0]===nums[i+1] && p[1]===nums[i]),'original XML vertices remain')
+    }
+  }
+  for(const r of Object.values(borders.connections)){
+    assert.deepEqual(r.coordinates[0],r.start)
+    assert.deepEqual(r.coordinates.at(-1),r.end)
+    assert.ok(r.endpointOffsetsM.every(value=>value<=10000))
+    if(r.kind==='Hong Kong Boundaries')assert.ok(Math.max(...r.coordinates.map(p=>p[1]))>22.56,'reference follows the northern exterior, not internal district edges')
+  }
+  const beijing=Object.values(objects).find(o=>o.fields.designator==='ZBAACTA')
+  const altered=structuredClone(borders)
+  const entry=Object.values(altered.connections).find(r=>r.objectId===beijing.id)
+  entry.start=[0,0]
+  assert.match(airspaceGeometry(beijing,objects,altered).reason,/与当前 XML 对象或端点不一致/)
+  const guangzhou=Object.values(objects).find(o=>o.fields.designator==='ZGZU')
+  const simplified=data.collections.Airspace.features.filter(f=>f.properties.incompleteBoundary)
+  assert.equal(simplified.length,17)
+  for(const feature of simplified){
+    const ring=feature.geometry.coordinates[0]
+    assert.deepEqual(ring[0],ring.at(-1))
+    assert.ok(feature.properties.geometryWarnings.some(w=>w.startsWith('边界不完整')))
+    for(const record of borders.unmatched.filter(r=>r.objectId===feature.properties.id)){
+      const i=ring.findIndex(p=>p[0]===record.start[0] && p[1]===record.start[1])
+      assert.ok(i>=0)
+      assert.deepEqual(ring[i+1],record.end,'unmatched gap is one direct edge')
+    }
+  }
+  assert.equal(data.features.get(guangzhou.id).properties.incompleteBoundary,true)
+  assert.ok(data.features.get(guangzhou.id).properties.geometryWarnings.some(w=>w.includes('端点距参考边界过远')))
 })

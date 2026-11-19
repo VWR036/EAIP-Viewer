@@ -43,6 +43,7 @@
             <Alert v-if="selectionReason" type="warning" :message="`不可定位：${selectionReason}`" />
             <p v-for="key in summaryKeys" :key="key">{{ fieldNames[key] || key }}：{{ propertyText(selected, key) }}</p>
             <template v-if="selected.type === 'Airspace'">
+              <Alert v-for="warning in selectedFeature?.properties.geometryWarnings" :key="warning" type="warning" show-icon :message="warning" />
               <div v-for="(volume,i) in airspaceVolumes(selected)" :key="i">
                 <h3>空域高度范围{{ airspaceVolumes(selected).length > 1 ? `（${i + 1}）` : '' }}</h3>
                 <p v-for="key in altitudeKeys" :key="key">{{ fieldNames[key] }}：{{ propertyText({ properties: volume }, key) }}</p>
@@ -82,7 +83,8 @@
           </template>
         </aside>
       </div>
-      <p class="airac-map-note">航路线表示端点关系，箭头表示 XML 声明的可用方向（单向 / 双向），不代表实际飞行轨迹。航段过短时隐藏箭头，放大后显示。空域按 XML 水平边界绘制，高度与参考面见对象详情。RNAV / RNP 要求随航段标注显示。标签随放大显示；视野内最多显示 80 个标签。</p>
+      <p class="airac-map-note">航路线表示端点关系，箭头表示 XML 声明的可用方向（单向 / 双向），不代表实际飞行轨迹。航段过短时隐藏箭头，放大后显示。空域按 XML 水平边界绘制；边界不完整的空域以虚线显示，缺段按已有端点直线连接。高度与参考面见对象详情。RNAV / RNP 要求随航段标注显示。标签随放大显示；视野内最多显示 80 个标签。</p>
+      <p class="airac-map-note">外部边界仅作近似补全：<a href="https://www.naturalearthdata.com/downloads/10m-cultural-vectors/10m-admin-0-boundary-lines/" target="_blank" rel="noopener noreferrer">Natural Earth 1:10m</a>；香港行政区边界 © 香港特别行政区政府民政事务总署，来源 <a href="https://data.gov.hk/en-data/dataset/hk-had-json1-hong-kong-administrative-boundaries" target="_blank" rel="noopener noreferrer">DATA.GOV.HK</a>。补全对象的连接偏差见空域提示。</p>
     </template>
   </section>
 </template>
@@ -93,6 +95,7 @@ import { Alert, Button, Checkbox, Empty, Input, Result, Select, Spin } from 'ant
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { airac, label, typeNames, fieldNames, openObject, loadAirac } from '../airac.js'
+import { loadJSON } from '../store.js'
 import { buildMapData, searchMap, mapTypes, propertyText, airspaceTypes, airspaceType, airspaceVolumes, containsAirspace, routeArrowHeads, matchesRouteNavigation } from '../airac-map.js'
 
 const props = defineProps({ visible: Boolean, theme: String })
@@ -231,6 +234,7 @@ function choose(id, location) {
     pointLayers.get(id)?.setTooltipContent(navaidTooltip(id)).openTooltip()
   }
   if (object.type === 'Airspace') {
+    for (const warning of features[0].properties.geometryWarnings) addLine(warning)
     addLine(`类型：${object.fields.type}`)
     addLine(`关联空管服务：${selectedServices.value.length} 项；管制单位、呼号和收发频率见右侧面板。`)
     for (const [i, volume] of airspaceVolumes(object).entries()) {
@@ -346,7 +350,10 @@ function retryTiles() { failedTiles.clear(); tileError.value = false; tiles.redr
 async function initialize() {
   if (!mounted || airac.status !== 'ready' || map || !props.visible) return
   try {
-    if (!data.value) data.value = buildMapData(airac.objects, airac.relations)
+    if (!data.value) {
+      const boundaries = await loadJSON('/data/airac-boundaries.json')
+      data.value = buildMapData(airac.objects, airac.relations, boundaries)
+    }
     await nextTick()
     if (!mounted || !props.visible || !container.value || map) return
     if (Boolean(tileUrl) !== Boolean(tileAttribution)) throw new Error('自定义底图必须同时配置 VITE_AIRAC_TILE_URL 和 VITE_AIRAC_TILE_ATTRIBUTION。')
@@ -361,7 +368,7 @@ async function initialize() {
       const features = data.value.collections.Airspace.features.filter(f => f.properties.airspaceType === type)
       const group = L.geoJSON(features, {
         renderer, interactive: false,
-        style: { color: colors.value.Airspace, weight: type === 'FIR' ? 2.5 : 1.5, opacity: 0.65, fillOpacity: 0.025, dashArray: ['AR', 'AP', 'SECTOR'].includes(type) ? '5 4' : null },
+        style: feature => ({ color: colors.value.Airspace, weight: type === 'FIR' ? 2.5 : 1.5, opacity: 0.65, fillOpacity: 0.025, dashArray: feature.properties.incompleteBoundary || ['AR', 'AP', 'SECTOR'].includes(type) ? '5 4' : null }),
         onEachFeature: (feature, layer) => {
           layer.bindTooltip(textNode(`${airac.objects[feature.properties.id].fields.designator} · ${name}`), { direction: 'center' })
           spaceLayers.set(feature.properties.id, layer)

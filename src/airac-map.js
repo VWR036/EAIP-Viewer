@@ -28,10 +28,152 @@ function one(node, name, namespace = A) {
 export function airspaceVolumes(object) {
   return children(object.properties, 'geometryComponent').map(n => one(one(one(n, 'AirspaceGeometryComponent'), 'theAirspaceVolume'), 'AirspaceVolume'))
 }
-export function airspaceGeometry(object) {
+const numeric = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/
+function geometryNumber(node) {
+  if (nil(node) || node.children.length || !numeric.test(node.text.trim()) || !Number.isFinite(Number(node.text))) throw new Error(`${node.name} 不是有效数值`)
+  return Number(node.text)
+}
+// Vincenty's direct solution on WGS84; bearings follow EPSG:4326 (north, east).
+function geodesicDestination([lon, lat], bearing, distance) {
+  const rad = Math.PI / 180, a = 6378137, f = 1 / 298.257223563, b = a * (1 - f)
+  const alpha = bearing * rad, u = Math.atan((1 - f) * Math.tan(lat * rad))
+  const sinU = Math.sin(u), cosU = Math.cos(u), sinAlpha = cosU * Math.sin(alpha), cosSqAlpha = 1 - sinAlpha ** 2
+  const sigma1 = Math.atan2(Math.tan(u), Math.cos(alpha)), uSq = cosSqAlpha * (a * a - b * b) / (b * b)
+  const ca = 1 + uSq / 16384 * (4096 + uSq * (-768 + uSq * (320 - 175 * uSq)))
+  const cb = uSq / 1024 * (256 + uSq * (-128 + uSq * (74 - 47 * uSq)))
+  const base = distance / (b * ca)
+  let sigma = base, converged = false
+  for (let i = 0; i < 32; i++) {
+    const c = Math.cos(2 * sigma1 + sigma), s = Math.sin(sigma)
+    const next = base + cb * s * (c + cb / 4 * (Math.cos(sigma) * (-1 + 2 * c * c) - cb / 6 * c * (-3 + 4 * s * s) * (-3 + 4 * c * c)))
+    if (Math.abs(next - sigma) < 1e-12) { sigma = next; converged = true; break }
+    sigma = next
+  }
+  if (!converged) throw new Error('圆弧 WGS84 坐标计算未收敛')
+  const sinSigma = Math.sin(sigma), cosSigma = Math.cos(sigma), c = Math.cos(2 * sigma1 + sigma)
+  const t = sinU * sinSigma - cosU * cosSigma * Math.cos(alpha)
+  const phi = Math.atan2(sinU * cosSigma + cosU * sinSigma * Math.cos(alpha), (1 - f) * Math.hypot(sinAlpha, t))
+  const lambda = Math.atan2(sinSigma * Math.sin(alpha), cosU * cosSigma - sinU * sinSigma * Math.cos(alpha))
+  const cc = f / 16 * cosSqAlpha * (4 + f * (4 - 3 * cosSqAlpha))
+  const delta = lambda - (1 - cc) * f * sinAlpha * (sigma + cc * sinSigma * (c + cc * cosSigma * (-1 + 2 * c * c)))
+  return [((lon + delta / rad + 540) % 360) - 180, phi / rad]
+}
+function geodesicInverse([lon1, lat1], [lon2, lat2]) {
+  const rad = Math.PI / 180, a = 6378137, f = 1 / 298.257223563, b = a * (1 - f)
+  const u1 = Math.atan((1 - f) * Math.tan(lat1 * rad)), u2 = Math.atan((1 - f) * Math.tan(lat2 * rad))
+  const s1 = Math.sin(u1), c1 = Math.cos(u1), s2 = Math.sin(u2), c2 = Math.cos(u2), delta = (lon2 - lon1) * rad
+  let lambda = delta, sigma, sinSigma, cosSigma, cosSqAlpha, cos2SigmaM, converged = false
+  for (let i = 0; i < 32; i++) {
+    sinSigma = Math.hypot(c2 * Math.sin(lambda), c1 * s2 - s1 * c2 * Math.cos(lambda))
+    if (sinSigma === 0) throw new Error('备注圆弧端点不能与圆心重合')
+    cosSigma = s1 * s2 + c1 * c2 * Math.cos(lambda)
+    sigma = Math.atan2(sinSigma, cosSigma)
+    const sinAlpha = c1 * c2 * Math.sin(lambda) / sinSigma
+    cosSqAlpha = 1 - sinAlpha ** 2
+    cos2SigmaM = cosSqAlpha ? cosSigma - 2 * s1 * s2 / cosSqAlpha : 0
+    const cc = f / 16 * cosSqAlpha * (4 + f * (4 - 3 * cosSqAlpha))
+    const next = delta + (1 - cc) * f * sinAlpha * (sigma + cc * sinSigma * (cos2SigmaM + cc * cosSigma * (-1 + 2 * cos2SigmaM ** 2)))
+    if (Math.abs(next - lambda) < 1e-12) { converged = true; break }
+    lambda = next
+  }
+  if (!converged) throw new Error('备注圆弧端点 WGS84 反算未收敛')
+  const uSq = cosSqAlpha * (a * a - b * b) / (b * b)
+  const ca = 1 + uSq / 16384 * (4096 + uSq * (-768 + uSq * (320 - 175 * uSq)))
+  const cb = uSq / 1024 * (256 + uSq * (-128 + uSq * (74 - 47 * uSq)))
+  const correction = cb * sinSigma * (cos2SigmaM + cb / 4 * (cosSigma * (-1 + 2 * cos2SigmaM ** 2) - cb / 6 * cos2SigmaM * (-3 + 4 * sinSigma ** 2) * (-3 + 4 * cos2SigmaM ** 2)))
+  return { distance: b * ca * (sigma - correction), bearing: (Math.atan2(c2 * Math.sin(lambda), c1 * s2 - s1 * c2 * Math.cos(lambda)) / rad + 360) % 360 }
+}
+function sampleArc(center, radius, start, sweep) {
+  if (!Number.isFinite(radius) || radius <= 0) throw new Error('圆弧半径必须为正有限数值')
+  if (!Number.isFinite(sweep) || sweep === 0 || Math.abs(sweep) > 360) throw new Error('圆弧角度跨度必须大于 0 且不超过 360 度')
+  // At most 2 degrees per chord, tightening to a 5 m sagitta for large radii.
+  const step = Math.min(2, 2 * Math.acos(Math.max(-1, 1 - 5 / radius)) * 180 / Math.PI)
+  const count = Math.ceil(Math.abs(sweep) / step)
+  const points = Array.from({ length: count + 1 }, (_, i) => geodesicDestination(center, start + sweep * i / count, radius))
+  if (Math.abs(sweep) === 360) points[points.length - 1] = [...points[0]]
+  return points
+}
+function annotationArc(curve) {
+  const notes = children(curve, 'annotation').flatMap(n => children(n, 'Note')).filter(n => children(n, 'propertyName').some(p => p.text === 'arc'))
+  if (!notes.length) return null
+  if (notes.length !== 1) throw new Error('同一 Curve 的圆弧备注不唯一')
+  const texts = children(notes[0], 'translatedNote').flatMap(n => children(n, 'LinguisticNote')).flatMap(n => children(n, 'note')).filter(n => n.attributes.lang === 'eng')
+  if (texts.length !== 1 || nil(texts[0])) throw new Error('圆弧英文备注缺失或不唯一')
+  const number = numeric.source.slice(1, -1)
+  const pattern = new RegExp(`^(?:a|an) ((?:anti)?clockwise(?:d)?) arc with radius of (${number})\\s*(km|m|nm) centered at (${number}) (${number})$`, 'i')
+  const match = texts[0].text.trim().replace(/\s+/g, ' ').match(pattern)
+  if (!match) throw new Error(`不支持的圆弧备注：${texts[0].text}`)
+  const radius = Number(match[2]) * { km: 1000, m: 1, nm: 1852 }[match[3].toLowerCase()]
+  const lat = Number(match[4]), lon = Number(match[5])
+  if (!Number.isFinite(radius) || radius <= 0 || !Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) throw new Error('圆弧备注的半径或圆心无效')
+  return { radius, center: [lon, lat], clockwise: !match[1].toLowerCase().startsWith('anti') }
+}
+function annotationBoundary(curve) {
+  const notes = children(curve, 'annotation').flatMap(n => children(n, 'Note')).filter(n => children(n, 'propertyName').some(p => p.text === 'boundary'))
+  if (!notes.length) return null
+  const texts = notes.flatMap(n => children(n, 'translatedNote')).flatMap(n => children(n, 'LinguisticNote')).flatMap(n => children(n, 'note')).filter(n => n.attributes.lang === 'eng')
+  if (notes.length !== 1 || texts.length !== 1 || nil(texts[0]) || !['National Boundaries', 'Hong Kong Boundaries'].includes(texts[0].text)) throw new Error('边界英文备注不支持或不唯一')
+  return texts[0].text
+}
+function geodesicPoints(segment, surface, allowSingle) {
+  if (segment.name !== 'GeodesicString' || segment.namespace !== G) throw new Error(`尚不支持空域曲线 ${segment.name}，未绘制此空域`)
+  const list = one(segment, 'posList', G)
+  for (const n of [segment, list]) {
+    if ((n.attributes.srsName && n.attributes.srsName !== surface.attributes.srsName) || (n.attributes.srsDimension && n.attributes.srsDimension !== '2')) throw new Error('空域坐标 CRS 或维度不一致')
+  }
+  const parts = list.text.trim().split(/\s+/)
+  if (list.children.length || parts.length < (allowSingle ? 2 : 4) || parts.length % 2 || !parts.every(v => numeric.test(v))) throw new Error('空域 posList 格式错误')
+  const points = []
+  for (let i = 0; i < parts.length; i += 2) {
+    const lat = Number(parts[i]), lon = Number(parts[i + 1])
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) throw new Error('空域坐标越界或不是有限数值')
+    points.push([lon, lat])
+  }
+  return points
+}
+function circularBoundary(segment, surface, objects) {
+  if (segment.attributes.numArc !== '1') throw new Error('圆形 / 圆弧 numArc 必须为 1')
+  const centers = segment.children.filter(n => n.namespace === G && ['pos', 'pointProperty'].includes(n.name))
+  if (centers.length !== 1) throw new Error('圆形 / 圆弧必须有唯一的 pos 或 pointProperty 圆心')
+  const centerNode = centers[0]
+  for (const n of [segment, centerNode]) {
+    if ((n.attributes.srsName && n.attributes.srsName !== surface.attributes.srsName) || (n.attributes.srsDimension && n.attributes.srsDimension !== '2')) throw new Error('圆心 CRS 或维度不一致')
+  }
+  let center
+  if (centerNode.name === 'pos') {
+    const parts = centerNode.text.trim().split(/\s+/)
+    if (nil(centerNode) || centerNode.children.length || parts.length !== 2 || !parts.every(v => numeric.test(v))) throw new Error('圆心 pos 格式错误')
+    const [lat, lon] = parts.map(Number)
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) throw new Error('圆心坐标越界或不是有限数值')
+    center = [lon, lat]
+  } else {
+    const href = centerNode.attributes['{http://www.w3.org/1999/xlink}href']
+    if (nil(centerNode) || !href?.startsWith('urn:uuid:')) throw new Error('圆心 pointProperty 引用无效')
+    const target = objects[href.slice(9)]
+    if (target?.active !== true || !paths[target.type]) throw new Error(`圆心引用目标缺失、无效或不支持：${href}`)
+    const result = position(target)
+    if (result.status !== 'valid') throw new Error(`圆心引用目标位置不可用：${href} · ${result.reason}`)
+    center = result.coordinates
+  }
+  const radiusNode = one(segment, 'radius', G), units = { M: 1, KM: 1000, NM: 1852 }
+  if (!Object.hasOwn(units, radiusNode.attributes.uom)) throw new Error(`不支持的圆弧半径单位：${radiusNode.attributes.uom}`)
+  const radius = geometryNumber(radiusNode) * units[radiusNode.attributes.uom]
+  if (!Number.isFinite(radius) || radius <= 0) throw new Error('圆弧半径必须为正有限数值')
+  const circle = segment.name === 'CircleByCenterPoint'
+  const angle = name => {
+    const n = one(segment, name, G)
+    if (n.attributes.uom !== 'deg') throw new Error(`不支持的圆弧角度单位：${n.attributes.uom}`)
+    return geometryNumber(n)
+  }
+  const start = circle ? 0 : angle('startAngle'), end = circle ? 360 : angle('endAngle'), sweep = end - start
+  return sampleArc(center, radius, start, sweep)
+}
+export function airspaceGeometry(object, objects = {}, boundaryData = null) {
   if (object.properties.namespace !== A || object.properties.name !== 'AirspaceTimeSlice') return { status: 'invalid', reason: '不支持的空域时间片结构' }
   if (!children(object.properties, 'geometryComponent').length) return { status: 'missing', reason: '缺少 geometryComponent' }
   try {
+    const warnings = []
+    let incompleteBoundary = false
     const polygons = airspaceVolumes(object).map(volume => {
       const surface = one(one(volume, 'horizontalProjection'), 'ElevatedSurface')
       if (surface.attributes.srsName !== 'urn:ogc:def:crs:EPSG::4326' || (surface.attributes.srsDimension && surface.attributes.srsDimension !== '2')) throw new Error('空域边界 CRS 或维度不支持')
@@ -39,33 +181,87 @@ export function airspaceGeometry(object) {
       if (patch.children.some(n => !['exterior', 'interior'].includes(n.name) || n.namespace !== G)) throw new Error('不支持的 PolygonPatch 结构')
       return [one(patch, 'exterior', G), ...children(patch, 'interior', G)].map(boundary => {
         const ring = one(boundary, 'Ring', G), coordinates = []
+        let curved = false, previousArc = false, firstArc = false
+        const connectArc = (start, end) => warnings.push(`圆弧与相邻边界按 XML 顺序直线连接，连接段长度 ${geodesicInverse(start, end).distance.toFixed(1)} M`)
+        const appendPoints = (points, arc) => {
+          if (!coordinates.length) { firstArc = arc; coordinates.push(...points) }
+          else {
+            const different = coordinates.at(-1).some((v, i) => curved || arc ? Math.abs(v - points[0][i]) > 1e-8 : v !== points[0][i])
+            if (different) {
+              if (!arc && !previousArc) throw new Error('空域边界曲线不连续')
+              connectArc(coordinates.at(-1), points[0])
+              coordinates.push(...points)
+            } else coordinates.push(...points.slice(1))
+          }
+          previousArc = arc
+        }
         if (!ring.children.length || ring.children.some(n => n.name !== 'curveMember' || n.namespace !== G)) throw new Error('不支持的空域 Ring 结构')
-        for (const member of ring.children) {
-          const segments = one(one(member, 'Curve'), 'segments', G)
+        const curves = ring.children.map(member => one(member, 'Curve')), arcs = curves.map(annotationArc), boundaries = curves.map(annotationBoundary)
+        for (const [index, curve] of curves.entries()) {
+          const segments = one(curve, 'segments', G)
           if (!segments.children.length) throw new Error('空域边界 segments 为空')
-          for (const segment of segments.children) {
-            if (segment.name !== 'GeodesicString' || segment.namespace !== G) throw new Error(`尚不支持空域曲线 ${segment.name}，未绘制此空域`)
-            const list = one(segment, 'posList', G)
-            for (const n of [segments, segment, list]) {
-              if ((n.attributes.srsName && n.attributes.srsName !== surface.attributes.srsName) || (n.attributes.srsDimension && n.attributes.srsDimension !== '2')) throw new Error('空域坐标 CRS 或维度不一致')
+          if ((segments.attributes.srsName && segments.attributes.srsName !== surface.attributes.srsName) || (segments.attributes.srsDimension && segments.attributes.srsDimension !== '2')) throw new Error('空域坐标 CRS 或维度不一致')
+          for (const [segmentIndex, segment] of segments.children.entries()) {
+            if (segment.namespace === G && ['CircleByCenterPoint', 'ArcByCenterPoint'].includes(segment.name)) {
+              const points = circularBoundary(segment, surface, objects)
+              appendPoints(points, segment.name === 'ArcByCenterPoint')
+              curved = true
+              continue
             }
-            const parts = list.text.trim().split(/\s+/)
-            if (list.children.length || parts.length < 4 || parts.length % 2 || !parts.every(v => /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(v))) throw new Error('空域 posList 格式错误')
-            const points = []
-            for (let i = 0; i < parts.length; i += 2) {
-              const lat = Number(parts[i]), lon = Number(parts[i + 1])
-              if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) throw new Error('空域坐标越界或不是有限数值')
-              points.push([lon, lat])
+            const next = segments.children[segmentIndex + 1] || one(curves[(index + 1) % curves.length], 'segments', G).children[0]
+            const nextArc = next?.namespace === G && next.name === 'ArcByCenterPoint'
+            const previous = (index + curves.length - 1) % curves.length
+            const points = geodesicPoints(segment, surface, Boolean(previousArc || nextArc || arcs[index] || arcs[previous] || boundaries[index] || boundaries[previous]))
+            appendPoints(points, false)
+          }
+          const arc = arcs[index]
+          if (arc) {
+            const next = one(curves[(index + 1) % curves.length], 'segments', G).children[0]
+            const start = coordinates.at(-1), end = geodesicPoints(next, surface, true)[0]
+            const first = geodesicInverse(arc.center, start), last = geodesicInverse(arc.center, end)
+            const error = Math.max(Math.abs(first.distance - arc.radius), Math.abs(last.distance - arc.radius))
+            if (error > arc.radius * 0.01) throw new Error(`备注圆弧端点偏离半径超过 1%：${error.toFixed(1)} M`)
+            const sweep = arc.clockwise ? (last.bearing - first.bearing + 360) % 360 : -((first.bearing - last.bearing + 360) % 360)
+            const points = sampleArc(arc.center, arc.radius, first.bearing, sweep)
+            points[0] = [...start]; points[points.length - 1] = [...end]
+            coordinates.push(...points.slice(1))
+            curved = true
+            warnings.push(`按英文备注补全${arc.clockwise ? '顺时针' : '逆时针'}圆弧（半径 ${arc.radius / 1000} KM）；近似连接保留 XML 端点，最大半径偏差 ${error.toFixed(1)} M`)
+          }
+          const boundary = boundaries[index]
+          if (boundary) {
+            const curveId = curve.attributes[`{${G}}id`]
+            const connection = boundaryData?.connections[curveId]
+            const start = coordinates.at(-1), next = one(curves[(index + 1) % curves.length], 'segments', G).children[0]
+            const end = geodesicPoints(next, surface, true)[0]
+            if (!connection) {
+              const record = boundaryData?.unmatched.find(r => r.curveId === curveId)
+              coordinates.push([...end])
+              incompleteBoundary = true
+              warnings.push(`边界不完整：${boundary} 缺段已按 XML 顺序直线连接现有端点。${record ? record.reason : '尚无匹配的外部边界参考。'}`)
+              continue
             }
-            if (coordinates.length && coordinates.at(-1).some((v, i) => v !== points[0][i])) throw new Error('空域边界曲线不连续')
-            coordinates.push(...(coordinates.length ? points.slice(1) : points))
+            const points = connection.coordinates
+            const same = (p, q) => p.length === 2 && p.every((v, i) => v === q[i])
+            if (connection.objectId !== object.id || connection.kind !== boundary || !same(connection.start, start) || !same(connection.end, end)) throw new Error('外部边界连接与当前 XML 对象或端点不一致')
+            if (!Array.isArray(points) || points.length < 3 || !points.every(p => Array.isArray(p) && p.length === 2 && p.every(Number.isFinite) && Math.abs(p[0]) <= 180 && Math.abs(p[1]) <= 90) || !same(points[0], start) || !same(points.at(-1), end)) throw new Error('外部边界连接坐标无效')
+            const source = boundaryData.sources[boundary]
+            if (!source?.name || !Array.isArray(connection.endpointOffsetsM) || connection.endpointOffsetsM.length !== 2 || connection.endpointOffsetsM.some(v => !Number.isFinite(v) || v < 0 || v > boundaryData.maxEndpointOffsetM)) throw new Error('外部边界来源或端点偏移无效')
+            coordinates.push(...points.slice(1))
+            warnings.push(`外部边界近似补全：${source.name}；XML 两端距参考线 ${connection.endpointOffsetsM.map(v => v.toFixed(0)).join(' / ')} M。仅作地图参考。`)
           }
         }
-        if (coordinates.length < 4 || coordinates[0].some((v, i) => v !== coordinates.at(-1)[i])) throw new Error('空域边界未闭合或顶点不足')
+        if (coordinates.length < 4) throw new Error('空域边界未闭合或顶点不足')
+        if (coordinates[0].some((v, i) => curved ? Math.abs(v - coordinates.at(-1)[i]) > 1e-8 : v !== coordinates.at(-1)[i])) {
+          if (!firstArc && !previousArc) throw new Error('空域边界未闭合或顶点不足')
+          connectArc(coordinates.at(-1), coordinates[0])
+          coordinates.push([...coordinates[0]])
+        }
+        if (curved) coordinates[coordinates.length - 1] = [...coordinates[0]]
         return coordinates
       })
     })
-    return { status: 'valid', geometry: polygons.length === 1 ? { type: 'Polygon', coordinates: polygons[0] } : { type: 'MultiPolygon', coordinates: polygons } }
+    return { status: 'valid', geometry: polygons.length === 1 ? { type: 'Polygon', coordinates: polygons[0] } : { type: 'MultiPolygon', coordinates: polygons }, warnings, incompleteBoundary }
   } catch (error) { return { status: 'invalid', reason: error.message } }
 }
 export function containsAirspace(geometry, point) {
@@ -183,20 +379,22 @@ export function buildAirspaceServices(objects, relations) {
   return new Map([...airspaces].map(([id, ids]) => [id, [...ids].map(serviceId => summaries.get(serviceId))]))
 }
 
-export function buildMapData(objects, relations) {
+export function buildMapData(objects, relations, boundaryData = null) {
+  if (boundaryData && (boundaryData.formatVersion !== 1 || !boundaryData.connections || !boundaryData.sources || !Array.isArray(boundaryData.unmatched) || !Number.isFinite(boundaryData.maxEndpointOffsetM))) throw new Error('外部边界数据结构或版本不正确')
   const collections = Object.fromEntries([...mapTypes.slice(0, 3), 'RouteSegment', 'Airspace'].map(type => [type, { type: 'FeatureCollection', features: [] }]))
   const positions = new Map(), features = new Map(), segments = new Map(), routes = new Map(), equipment = new Map()
-  const diagnostics = { missing: [], invalid: [], segments: [], directions: [], counts: {} }
+  const diagnostics = { missing: [], invalid: [], segments: [], directions: [], approximations: [], counts: {} }
   const active = Object.values(objects).filter(o => o.active === true)
   for (const o of active) {
     if (o.type === 'Route') routes.set(o.id, [])
     if (o.type === 'RouteSegment') segments.set(o.id, { start: [], end: [], route: [], errors: [] })
     if (o.type === 'Navaid') equipment.set(o.id, [])
     if (o.type === 'Airspace') {
-      const result = airspaceGeometry(o)
+      const result = airspaceGeometry(o, objects, boundaryData)
       if (result.status !== 'valid') diagnostics[result.status].push({ id: o.id, type: o.type, reason: result.reason })
       else {
-        const feature = { type: 'Feature', geometry: result.geometry, properties: { id: o.id, type: o.type, airspaceType: airspaceType(o), label: label(o) } }
+        const feature = { type: 'Feature', geometry: result.geometry, properties: { id: o.id, type: o.type, airspaceType: airspaceType(o), label: label(o), geometryWarnings: result.warnings, incompleteBoundary: result.incompleteBoundary } }
+        for (const reason of result.warnings) diagnostics.approximations.push({ id: o.id, type: o.type, reason })
         collections.Airspace.features.push(feature)
         features.set(o.id, feature)
       }
